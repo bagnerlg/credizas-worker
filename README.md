@@ -51,3 +51,14 @@ Deben permanecer como Secrets del Worker:
 - `/admin` → panel administrativo.
 
 El administrador habilita el Paso 2 cambiando el proceso del expediente a `FORMALIZACION DE CREDITO`.
+
+
+## V21 · Administración y flujo
+- Administración puede crear solicitudes vinculadas a cualquier vendedor.
+- Administración puede editar y eliminar expedientes.
+- RECHAZADA cierra el expediente hasta que administración cambie el estado.
+- APROBADA en Precalificación habilita automáticamente Formalización.
+- APROBADA en Formalización requiere indicar qué procede con el cliente.
+- Vendedor solo edita cuando el estado es REQUIERE DATOS.
+- REINGRESADO se asigna automáticamente después de una corrección del vendedor.
+- No agrega ni reinicializa variables, KV o R2; conserva los bindings existentes.

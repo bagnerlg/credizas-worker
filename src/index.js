@@ -954,6 +954,8 @@ function caseSummary(record) {
     proceso: record?.proceso || (record?.stage2 ? "FORMALIZACION DE CREDITO" : "PRECALIFICACION"),
     estado: record?.estado || record?.stage2?.control?.estado || record?.stage1?.control?.estado || "SUBIDA",
     detalle: currentControl?.detalle || record?.ultimo_requerimiento || "",
+    procede: record?.procede_cliente || "",
+    cerrado: (record?.estado || "") === "RECHAZADA",
     updated_at: record?.updated_at || record?.created_at || null,
     created_at: record?.created_at || null,
     stage1_submitted_at: record?.stage1?.submitted_at || null,
@@ -1109,12 +1111,14 @@ function sellerCasePermissions(record) {
   const state = record?.estado || "SUBIDA";
   const has1 = Boolean(record?.stage1);
   const has2 = Boolean(record?.stage2);
+  const closed = state === "RECHAZADA";
   return {
-    edit_stage1: process === "PRECALIFICACION" && has1 && state === "REQUIERE DATOS",
-    start_stage2: process === "FORMALIZACION DE CREDITO" && has1 && !has2,
-    edit_stage2: process === "FORMALIZACION DE CREDITO" && has2 && state === "REQUIERE DATOS",
+    edit_stage1: !closed && process === "PRECALIFICACION" && has1 && state === "REQUIERE DATOS",
+    start_stage2: !closed && process === "FORMALIZACION DE CREDITO" && has1 && !has2,
+    edit_stage2: !closed && process === "FORMALIZACION DE CREDITO" && has2 && state === "REQUIERE DATOS",
     view_stage1: has1,
     view_stage2: process === "FORMALIZACION DE CREDITO" && has1,
+    closed,
     requirement: state === "REQUIERE DATOS" ? (record?.ultimo_requerimiento || record?.stage2?.control?.detalle || record?.stage1?.control?.detalle || "") : ""
   };
 }
@@ -1142,6 +1146,7 @@ const ADMIN_EXPORT_FIELDS = {
   proceso: "Proceso",
   estado: "Estado",
   detalle: "Detalle / información requerida",
+  procede: "Qué procede con el cliente",
   producto: "Producto",
   producto_sku: "SKU",
   precio_catalogo: "Precio catálogo interno",
@@ -1494,6 +1499,7 @@ const APP_HTML = String.raw`<!doctype html>
 <script>
 const q=s=>document.querySelector(s);
 let extracted=null,sentPayload=null,requestId=null,stage2Extraction=null,stage1Decision=null,finalPayloadCache=null,currentCaseId=null,currentSeller="",currentSellerId="",sellerSession=null,currentPermissions={},currentRecordState=null,stage2AnalyzedSignature="";
+const pageParams=new URLSearchParams(location.search);const adminMode=pageParams.get("admin")==="1";const adminCaseId=pageParams.get("case_id")||"";const adminSellerId=pageParams.get("seller_id")||"";
 const preparedUploads={dpiFront:[],dpiBack:[],stage2Selfie:[],stage2Utility:[],stage2Income:[]};
 
 const DRAFT_KEY="credizas_draft_v19";
@@ -1506,7 +1512,7 @@ function stage2Signature(){return [preparedUploads.stage2Selfie,...preparedUploa
 function invalidateStage2Analysis(){stage2AnalyzedSignature="";q("#stage2ExtractMsg").innerHTML=""}
 function selectedSeller(){return currentSeller||sellerSession?.name||""}
 function showOnly(id){for(const x of ["screenLogin","screenHome","screen1","screen2"])q("#"+x)?.classList.toggle("hidden",x!==id)}
-function goHome(){if(!sellerSession){showOnly("screenLogin");return}showOnly("screenHome");q("#pageTitle").textContent="CrediZas · Mis solicitudes";q("#pageSubtitle").textContent="Consulta el estado de tus clientes o crea una nueva solicitud.";q("#sellerGreeting").textContent="Vendedor: "+sellerSession.name;loadSellerCases()}
+function goHome(){if(adminMode){location.href="/admin";return}if(!sellerSession){showOnly("screenLogin");return}showOnly("screenHome");q("#pageTitle").textContent="CrediZas · Mis solicitudes";q("#pageSubtitle").textContent="Consulta el estado de tus clientes o crea una nueva solicitud.";q("#sellerGreeting").textContent="Vendedor: "+sellerSession.name;loadSellerCases()}
 function sellerStateLabel(v){return v==="REQUIERE DATOS"?"REQUIERE INFORMACIÓN":v==="EN REVISION"?"EN REVISIÓN":v}
 function sellerProcessLabel(v){return v==="FORMALIZACION DE CREDITO"?"Formalización de crédito":"Precalificación"}
 
@@ -1515,7 +1521,7 @@ function fillForm(form,data){const flat=flattenObject(data);for(const [name,valu
 
 let draftTimer=null;
 function saveDraftSoon(){clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,250)}
-function saveDraft(){try{const data={case_id:currentCaseId,seller:currentSeller||selectedSeller(),seller_id:currentSellerId||sellerSession?.id||"",screen:q("#screen2")&&!q("#screen2").classList.contains("hidden")?"screen2":"screen1",stage1:collect(q("#preForm")),stage2:collect(q("#stage2Form")),sentPayload,requestId,stage1Decision};localStorage.setItem(DRAFT_KEY,JSON.stringify(data));q("#draftBanner")?.classList.remove("hidden")}catch{}}
+function saveDraft(){if(adminMode)return;try{const data={case_id:currentCaseId,seller:currentSeller||selectedSeller(),seller_id:currentSellerId||sellerSession?.id||"",screen:q("#screen2")&&!q("#screen2").classList.contains("hidden")?"screen2":"screen1",stage1:collect(q("#preForm")),stage2:collect(q("#stage2Form")),sentPayload,requestId,stage1Decision};localStorage.setItem(DRAFT_KEY,JSON.stringify(data));q("#draftBanner")?.classList.remove("hidden")}catch{}}
 function clearDraft(clearFiles=true){localStorage.removeItem(DRAFT_KEY);q("#draftBanner")?.classList.add("hidden");if(clearFiles)clearCachedFiles().catch(()=>{})}
 
 function openFileDb(){return new Promise((resolve,reject)=>{const r=indexedDB.open(FILE_DB,1);r.onupgradeneeded=()=>{const db=r.result;if(!db.objectStoreNames.contains("files"))db.createObjectStore("files")};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
@@ -1534,11 +1540,13 @@ async function checkSellerSession(){try{const r=await fetch("/api/seller/me"),d=
 async function sellerLogin(){const seller_id=q("#sellerLoginSelect").value,pin=q("#sellerLoginPin").value;const msg=q("#sellerLoginMsg");if(!seller_id||!/^[0-9]{4}$/.test(pin)){msg.innerHTML='<div class="notice warning">Selecciona vendedor e ingresa un PIN de 4 números.</div>';return}const r=await fetch("/api/seller/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({seller_id,pin})}),d=await r.json();if(!r.ok||!d.ok){msg.innerHTML='<div class="notice bad">'+esc(d.error||"No autorizado")+'</div>';return}sellerSession=d.seller;currentSeller=d.seller.name;currentSellerId=d.seller.id;q("#sellerLoginPin").value="";goHome()}
 async function registerSeller(){const name=q("#newSellerName").value.trim(),pin=q("#newSellerPin").value,pin2=q("#newSellerPin2").value,msg=q("#registerSellerMsg");if(name.length<3){msg.innerHTML='<div class="notice warning">Escribe tu nombre completo.</div>';return}if(!/^[0-9]{4}$/.test(pin)||pin!==pin2){msg.innerHTML='<div class="notice warning">El PIN debe tener exactamente 4 números y coincidir.</div>';return}const r=await fetch("/api/seller/register",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({name,pin})}),d=await r.json();if(!r.ok||!d.ok){msg.innerHTML='<div class="notice bad">'+esc(d.error||"No se pudo crear el vendedor")+'</div>';return}sellerSession=d.seller;currentSeller=d.seller.name;currentSellerId=d.seller.id;await loadSellerOptions();goHome()}
 async function sellerLogout(){await fetch("/api/seller/logout",{method:"POST"});sellerSession=null;currentSeller="";currentSellerId="";currentCaseId=null;showOnly("screenLogin");q("#pageTitle").textContent="CrediZas · Acceso de vendedor";q("#pageSubtitle").textContent="Ingresa con tu nombre y PIN.";await loadSellerOptions()}
-function actionForCase(c){if(c.proceso==="FORMALIZACION DE CREDITO"&&!c.tiene_paso2)return{label:"Completar Paso 2",edit:true};if(c.estado==="REQUIERE DATOS")return{label:"Editar información",edit:true};return{label:"Ver",edit:false}}
+function actionForCase(c){if(c.estado==="RECHAZADA")return{label:"Ver · Cerrada",edit:false};if(c.proceso==="FORMALIZACION DE CREDITO"&&!c.tiene_paso2)return{label:"Completar Paso 2",edit:true};if(c.estado==="REQUIERE DATOS")return{label:"Editar información",edit:true};return{label:"Ver",edit:false}}
 async function loadSellerCases(){if(!sellerSession)return;const term=q("#caseSearchInput")?.value.trim()||"",u=new URL("/api/seller/cases",location.origin);if(term)u.searchParams.set("q",term);const r=await fetch(u),d=await r.json(),box=q("#caseSearchResults");if(r.status===401){await sellerLogout();return}if(!r.ok){box.innerHTML='<div class="notice bad">'+esc(d.error||"No se pudo cargar")+'</div>';return}box.innerHTML=(d.cases||[]).length?(d.cases||[]).map(c=>{const a=actionForCase(c),detail=c.estado==="REQUIERE DATOS"&&c.detalle?'<div class="notice warning" style="margin:7px 0 0"><strong>Información solicitada:</strong> '+esc(c.detalle)+'</div>':'';return '<div class="case-row"><div><strong>'+esc(c.nombre||"Sin nombre")+'</strong><span class="muted">DPI '+esc(c.dpi||"")+' · '+esc(sellerProcessLabel(c.proceso))+' · '+esc(sellerStateLabel(c.estado))+'</span>'+detail+'</div><div class="case-actions"><button type="button" class="'+(a.edit?'yellow':'secondary')+'" data-open-case="'+esc(c.id)+'">'+a.label+'</button></div></div>'}).join(""):'<div class="muted">Todavía no tienes solicitudes.</div>';box.querySelectorAll("[data-open-case]").forEach(b=>b.addEventListener("click",()=>openExistingCase(b.dataset.openCase)))}
 async function searchCases(){return loadSellerCases()}
 function setStageEditable(stage,editable,requirement){const is1=stage==="stage1",form=is1?q("#preForm"):q("#stage2Form"),notice=is1?q("#stage1AdminNotice"):q("#stage2AdminNotice");if(form)form.querySelectorAll("input,select,textarea").forEach(el=>{if(el.type!=="hidden")el.disabled=!editable});if(is1){["dpiFront","dpiBack"].forEach(id=>{if(q("#"+id))q("#"+id).disabled=!editable});if(q("#analyzeBtn"))q("#analyzeBtn").disabled=!editable;if(q("#submitBtn"))q("#submitBtn").classList.toggle("hidden",!editable)}else{["stage2Selfie","stage2Utility","stage2Income"].forEach(id=>{if(q("#"+id))q("#"+id).disabled=!editable});if(q("#stage2AnalyzeBtn"))q("#stage2AnalyzeBtn").disabled=!editable;if(q("#finalSubmitBtn"))q("#finalSubmitBtn").classList.toggle("hidden",!editable)}if(notice){notice.classList.remove("hidden");notice.innerHTML=editable&&requirement?'<div class="notice warning"><strong>El administrador solicita corregir:</strong><br>'+esc(requirement)+'</div>':editable?'<div class="notice success"><strong>Captura habilitada.</strong> Completa y envía esta etapa.</div>':'<div class="lock-note"><strong>Solo lectura.</strong> El expediente está bloqueado para edición. Solo el administrador puede habilitar correcciones con “Requiere información”.</div>'}}
-async function openExistingCase(id){const r=await fetch("/api/seller/cases/"+encodeURIComponent(id)),d=await r.json();if(!r.ok||!d.case){alert(d.error||"No se pudo abrir");return}const rec=d.case;currentRecordState=rec;currentPermissions=d.permissions||{};currentCaseId=rec.id;currentSeller=sellerSession.name;currentSellerId=sellerSession.id;sentPayload=rec.stage1?.data||null;requestId=rec.stage1?.request_id||null;stage1Decision=rec.stage1?.decision||null;if(sentPayload){fillForm(q("#preForm"),sentPayload);syncProductUiFromForm()}if(rec.proceso==="FORMALIZACION DE CREDITO"){showOnly("screen2");configureStage2();q("#stage2FormCard").classList.remove("hidden");if(rec.stage2?.data)fillForm(q("#stage2Form"),rec.stage2.data);setStageEditable("stage2",Boolean(currentPermissions.start_stage2||currentPermissions.edit_stage2),currentPermissions.requirement||"");q("#pageTitle").textContent="Solicitud fácil de crédito · Paso 2";q("#stage2AccessNotice").innerHTML=currentPermissions.requirement?'<div class="notice warning"><strong>Corrección solicitada:</strong> '+esc(currentPermissions.requirement)+'</div>':''}else{showOnly("screen1");q("#formCard").classList.remove("hidden");setStageEditable("stage1",Boolean(currentPermissions.edit_stage1),currentPermissions.requirement||"");q("#pageTitle").textContent="Solicitud fácil de crédito · Paso 1"}updateStage1ValidationUI();updateStage2ValidationUI()}
+async function openExistingCase(id){const endpoint=adminMode?"/api/admin/cases/"+encodeURIComponent(id):"/api/seller/cases/"+encodeURIComponent(id);const r=await fetch(endpoint),d=await r.json();if(!r.ok||!d.case){alert(d.error||"No se pudo abrir");if(adminMode&&r.status===401)location.href="/admin";return}const rec=d.case;currentRecordState=rec;currentPermissions=adminMode?{edit_stage1:rec.estado!=="RECHAZADA",start_stage2:rec.estado!=="RECHAZADA",edit_stage2:rec.estado!=="RECHAZADA",requirement:rec.ultimo_requerimiento||"",closed:rec.estado==="RECHAZADA"}:(d.permissions||{});currentCaseId=rec.id;currentSeller=rec.vendedor||sellerSession?.name||"";currentSellerId=rec.vendedor_id||sellerSession?.id||"";if(adminMode)sellerSession={id:currentSellerId,name:currentSeller};sentPayload=rec.stage1?.data||null;requestId=rec.stage1?.request_id||null;stage1Decision=rec.stage1?.decision||null;if(sentPayload){fillForm(q("#preForm"),sentPayload);syncProductUiFromForm()}const closed=rec.estado==="RECHAZADA";if(rec.proceso==="FORMALIZACION DE CREDITO"){showOnly("screen2");configureStage2();q("#stage2FormCard").classList.remove("hidden");if(rec.stage2?.data)fillForm(q("#stage2Form"),rec.stage2.data);setStageEditable("stage2",adminMode?!closed:Boolean(currentPermissions.start_stage2||currentPermissions.edit_stage2),adminMode?(closed?"Expediente rechazado y cerrado. Cambia el estado desde Administración para reabrirlo.":"Edición administrativa habilitada."):(currentPermissions.requirement||""));q("#pageTitle").textContent=adminMode?"CrediZas · Editar Formalización":"Solicitud fácil de crédito · Paso 2";q("#stage2AccessNotice").innerHTML=currentPermissions.requirement?'<div class="notice warning"><strong>Corrección solicitada:</strong> '+esc(currentPermissions.requirement)+'</div>':''}else{showOnly("screen1");q("#formCard").classList.remove("hidden");setStageEditable("stage1",adminMode?!closed:Boolean(currentPermissions.edit_stage1),adminMode?(closed?"Expediente rechazado y cerrado. Cambia el estado desde Administración para reabrirlo.":"Edición administrativa habilitada."):(currentPermissions.requirement||""));q("#pageTitle").textContent=adminMode?"CrediZas · Editar Precalificación":"Solicitud fácil de crédito · Paso 1"}q("#pageSubtitle").textContent=adminMode?"Administración · "+currentSeller:"Revisa los datos del expediente.";updateStage1ValidationUI();updateStage2ValidationUI()}
+
+async function checkAdminWorkspace(){if(!adminMode)return false;const me=await fetch("/api/admin/me");if(!me.ok){location.href="/admin";return true}const sellersRes=await fetch("/api/admin/sellers"),sellersData=await sellersRes.json();if(adminCaseId){await openExistingCase(adminCaseId);q("#backHomeAfterStage1").textContent="Volver a Administración";return true}const seller=(sellersData.sellers||[]).find(x=>String(x.id)===String(adminSellerId));if(!seller){alert("Selecciona un vendedor desde el panel administrador.");location.href="/admin";return true}sellerSession=seller;currentSeller=seller.name;currentSellerId=seller.id;await clearCachedFiles();q("#preForm").reset();q("#stage2Form")?.reset();q("#selectedProduct")?.classList.add("hidden");q("#productSearch").value="";for(const k of Object.keys(preparedUploads))preparedUploads[k]=[];currentCaseId=crypto.randomUUID();sentPayload=null;requestId=null;stage1Decision=null;stage2Extraction=null;currentRecordState=null;currentPermissions={edit_stage1:true};showOnly("screen1");setStageEditable("stage1",true,"Edición administrativa habilitada.");q("#pageTitle").textContent="CrediZas · Nueva solicitud";q("#pageSubtitle").textContent="Administrador · Vendedor: "+seller.name;q("#backHomeAfterStage1").textContent="Volver a Administración";return true}
 
 function productCardHtml(name,sku,image,amount){const img=image?'<img src="'+esc(image)+'" alt="Producto">':'<div style="width:92px;height:92px;border:1px solid #d8e5dc;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;color:#98a2b3;font-weight:800">Sin imagen</div>';return '<div class="selected-product-card">'+img+'<div><div class="sp-name">'+esc(name||"")+'</div><div class="sp-sku">SKU: '+esc(sku||"N/D")+'</div><div class="sp-amount">Monto solicitado: '+catalogMoney(amount)+'</div></div></div>'}
 function syncProductUiFromForm(){const name=q('[name="solicitud.producto_solicitado"]')?.value||"",sku=q('[name="solicitud.producto_sku"]')?.value||"",image=q('[name="solicitud.producto_imagen_url"]')?.value||"",amount=Number(q('[name="solicitud.monto_total_solicitado"]')?.value||0);if(!name)return;q("#productSearch").value=name;q("#selectedProduct").classList.remove("hidden");q("#selectedProduct").innerHTML=productCardHtml(name,sku,image,amount)}
@@ -1639,31 +1647,33 @@ q("#stage2Form").addEventListener("submit",async e=>{e.preventDefault();const s2
 q("#resetBtn").addEventListener("click",()=>location.reload());updateButtons();updateStage1ValidationUI();
 
 setupPhoneInputs();
-loadSellerOptions();
-if(localStorage.getItem(DRAFT_KEY))q("#draftBanner")?.classList.remove("hidden");
-checkSellerSession();
+if(adminMode){checkAdminWorkspace()}else{loadSellerOptions();if(localStorage.getItem(DRAFT_KEY))q("#draftBanner")?.classList.remove("hidden");checkSellerSession()}
 </script>
 </body>
 </html>`;
 
 
 const ADMIN_HTML = String.raw`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CrediZas Admin</title><style>
-body{font-family:Inter,system-ui,Arial;margin:0;background:#f5f7fb;color:#172033}.wrap{max-width:1500px;margin:22px auto;padding:0 18px}.card{background:#fff;border:1px solid #dce3ee;border-radius:14px;padding:18px;margin-bottom:14px}input,select,button{font:inherit;padding:9px;border:1px solid #cbd5e1;border-radius:8px}button{background:#14577a;color:#fff;border:0;font-weight:800;cursor:pointer}.secondary{background:#e9eef5;color:#334155}.yellow{background:#f3c51d;color:#292300}.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.hidden{display:none!important}.table{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;min-width:900px}th,td{padding:8px;border-bottom:1px solid #e7ecf2;text-align:left;vertical-align:top}th{background:#f8fafc;position:sticky;top:0}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#e8eef5;white-space:nowrap}.actions{display:flex;gap:6px;flex-wrap:wrap}.fields{display:flex;gap:12px;flex-wrap:wrap}.fields label{font-size:12px}.control-cell{min-width:290px}.control-cell select{max-width:155px;padding:6px}.pdfs a{margin-right:7px}.msg{font-size:12px;margin-top:5px}@media(max-width:900px){.grid{grid-template-columns:1fr 1fr}}</style></head><body><div class="wrap"><h1>CrediZas · Administración</h1>
-<div class="card" id="loginCard"><h3>Ingreso de administrador</h3><input id="adminUser" placeholder="Usuario"><input id="adminPass" type="password" placeholder="Contraseña"><button id="loginBtn">Ingresar</button><div id="loginMsg" class="msg"></div></div>
-<div id="adminApp" class="hidden"><div class="card"><div class="grid"><input id="fQ" placeholder="Nombre, DPI, NIT o teléfono"><select id="fStatus"><option value="">Todos los estados</option><option>SUBIDA</option><option>EN REVISION</option><option value="REQUIERE DATOS">REQUIERE INFORMACIÓN</option><option>REINGRESADO</option><option>APROBADA</option><option>RECHAZADA</option></select><select id="fProcess"><option value="">Todos los procesos</option><option value="PRECALIFICACION">PRECALIFICACIÓN</option><option value="FORMALIZACION DE CREDITO">FORMALIZACIÓN DE CRÉDITO</option></select><select id="fSeller"><option value="">Todos los vendedores</option></select><select id="fSort"><option value="updated_desc">Más recientes</option><option value="date_asc">Más antiguos</option><option value="name_asc">Nombre A-Z</option><option value="nit_asc">NIT</option></select></div><div class="actions" style="margin-top:10px"><button id="searchBtn">Buscar</button><button id="exportBtn" class="yellow">Descargar Excel</button><button id="logoutBtn" class="secondary">Cerrar sesión</button></div></div>
-<div class="card"><details><summary style="cursor:pointer;font-weight:800">Seleccionar columnas visibles</summary><div id="fieldChooser" class="fields" style="margin-top:12px"></div></details></div>
+:root{--blue:#14577a;--yellow:#f3c51d;--line:#dce3ee;--muted:#667085;--bad:#c62828}*{box-sizing:border-box}body{font-family:Inter,system-ui,Arial;margin:0;background:#f5f7fb;color:#172033}.wrap{max-width:1560px;margin:18px auto;padding:0 14px}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:15px;margin-bottom:12px}h1{font-size:22px;margin:0 0 14px}input,select,button{font:inherit;padding:8px;border:1px solid #cbd5e1;border-radius:8px;min-width:0}button{background:var(--blue);color:#fff;border:0;font-weight:800;cursor:pointer}.secondary{background:#e9eef5;color:#334155}.yellow{background:var(--yellow);color:#292300}.danger{background:#c62828}.grid{display:grid;grid-template-columns:minmax(180px,2fr) repeat(4,minmax(125px,1fr));gap:7px}.newbar{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:8px;align-items:end}.hidden{display:none!important}.table{overflow:auto;padding:0}table{width:100%;border-collapse:collapse;font-size:11px;table-layout:auto}th,td{padding:6px 7px;border-bottom:1px solid #e7ecf2;text-align:left;vertical-align:top}th{background:#f8fafc;position:sticky;top:0;z-index:2;white-space:nowrap}td{max-width:220px;overflow-wrap:anywhere}.compact{white-space:nowrap;width:1%}.client{min-width:145px}.control-cell{min-width:230px;max-width:290px}.control-cell select{padding:5px;font-size:10px;max-width:138px}.actions{display:flex;gap:5px;flex-wrap:wrap}.actions button{padding:6px 8px;font-size:10px}.fields{display:flex;gap:10px;flex-wrap:wrap}.fields label{font-size:11px}.pdfs{white-space:nowrap}.pdfs a{margin-right:6px}.msg{font-size:10px;margin-top:4px;color:#475467}.procede{color:#166534;font-weight:700}.closed{color:#991b1b;font-weight:800}@media(max-width:980px){.grid{grid-template-columns:1fr 1fr}.newbar{grid-template-columns:1fr}.table{overflow:auto}table{min-width:900px}}</style></head><body><div class="wrap"><h1>CrediZas · Administración</h1>
+<div class="card" id="loginCard"><h3>Ingreso de administrador</h3><div class="actions"><input id="adminUser" placeholder="Usuario"><input id="adminPass" type="password" placeholder="Contraseña"><button id="loginBtn">Ingresar</button><button id="exitLoginBtn" class="secondary">Salir a usuarios</button></div><div id="loginMsg" class="msg"></div></div>
+<div id="adminApp" class="hidden">
+<div class="card"><div class="newbar"><div><strong>Nueva solicitud desde administración</strong><div class="msg">Selecciona el vendedor al que quedará vinculada.</div><select id="newSeller"><option value="">Seleccionar vendedor</option></select></div><button id="newCaseAdminBtn" class="yellow">Nueva solicitud</button></div></div>
+<div class="card"><div class="grid"><input id="fQ" placeholder="Nombre, DPI, NIT o teléfono"><select id="fStatus"><option value="">Todos los estados</option><option>SUBIDA</option><option value="EN REVISION">EN REVISIÓN</option><option value="REQUIERE DATOS">REQUIERE INFORMACIÓN</option><option>REINGRESADO</option><option>APROBADA</option><option>RECHAZADA</option></select><select id="fProcess"><option value="">Todos los procesos</option><option value="PRECALIFICACION">PRECALIFICACIÓN</option><option value="FORMALIZACION DE CREDITO">FORMALIZACIÓN DE CRÉDITO</option></select><select id="fSeller"><option value="">Todos los vendedores</option></select><select id="fSort"><option value="updated_desc">Más recientes</option><option value="date_asc">Más antiguos</option><option value="name_asc">Nombre A-Z</option><option value="nit_asc">NIT</option></select></div><div class="actions" style="margin-top:9px"><button id="searchBtn">Buscar</button><button id="exportBtn" class="yellow">Descargar Excel</button><button id="logoutBtn" class="secondary">Cerrar sesión</button></div></div>
+<div class="card"><details><summary style="cursor:pointer;font-weight:800">Seleccionar columnas visibles</summary><div id="fieldChooser" class="fields" style="margin-top:10px"></div></details></div>
 <div class="card table"><table><thead><tr id="headRow"></tr></thead><tbody id="rows"></tbody></table></div></div></div>
 <script>
-const q=s=>document.querySelector(s);const defs={updated_at:"Fecha",nombre:"Cliente",dpi:"DPI",nit:"NIT",telefono:"Teléfono",vendedor:"Vendedor",producto:"Producto",monto:"Monto",ingreso:"Ingreso",proceso:"Proceso",estado:"Estado",detalle:"Detalle"};let dataRows=[];let visible=["updated_at","nombre","dpi","nit","telefono","vendedor","proceso","estado"];
-function esc(v){return String(v??"").replace(/[&<>\"']/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;","'":"&#039;"}[s]))}function money(v){return "Q "+Number(v||0).toLocaleString("es-GT",{minimumFractionDigits:2,maximumFractionDigits:2})}function labelState(v){return v==="REQUIERE DATOS"?"REQUIERE INFORMACIÓN":v==="EN REVISION"?"EN REVISIÓN":v}function labelProcess(v){return v==="FORMALIZACION DE CREDITO"?"Formalización de crédito":"Precalificación"}
+const q=s=>document.querySelector(s);const defs={updated_at:"Fecha",nombre:"Cliente",dpi:"DPI",nit:"NIT",telefono:"Teléfono",vendedor:"Vendedor",producto:"Producto",monto:"Monto",ingreso:"Ingreso",proceso:"Proceso",estado:"Estado",detalle:"Detalle",procede:"Qué procede"};let dataRows=[];let visible=["updated_at","nombre","dpi","telefono","vendedor","proceso","estado"];
+function esc(v){return String(v??"").replace(/[&<>\"']/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;","'":"&#039;"}[s]))}function money(v){return "Q "+Number(v||0).toLocaleString("es-GT",{minimumFractionDigits:2,maximumFractionDigits:2})}function labelState(v){return v==="REQUIERE DATOS"?"REQUIERE INFORMACIÓN":v==="EN REVISION"?"EN REVISIÓN":v}function labelProcess(v){return v==="FORMALIZACION DE CREDITO"?"Formalización":"Precalificación"}
 function initFields(){const box=q("#fieldChooser");box.innerHTML=Object.entries(defs).map(([k,l])=>'<label><input type="checkbox" data-field="'+k+'" '+(visible.includes(k)?'checked':'')+'> '+l+'</label>').join("");box.querySelectorAll("input").forEach(x=>x.onchange=()=>{visible=[...box.querySelectorAll("input:checked")].map(i=>i.dataset.field);render()})}
 function display(c,k){if(k==="updated_at")return c[k]?new Date(c[k]).toLocaleString("es-GT"):"";if(k==="monto"||k==="ingreso")return money(c[k]);if(k==="proceso")return labelProcess(c[k]);if(k==="estado")return labelState(c[k]);return c[k]??""}
-function render(){q("#headRow").innerHTML=visible.map(k=>'<th>'+esc(defs[k])+'</th>').join("")+'<th>Control administrativo</th><th>PDF</th>';q("#rows").innerHTML=dataRows.map(c=>'<tr>'+visible.map(k=>'<td>'+esc(display(c,k))+'</td>').join("")+'<td class="control-cell"><div class="actions"><select data-proc="'+esc(c.id)+'"><option value="PRECALIFICACION" '+(c.proceso==="PRECALIFICACION"?'selected':'')+'>Precalificación</option><option value="FORMALIZACION DE CREDITO" '+(c.proceso==="FORMALIZACION DE CREDITO"?'selected':'')+'>Formalización</option></select><select data-state="'+esc(c.id)+'"><option '+(c.estado==="SUBIDA"?'selected':'')+'>SUBIDA</option><option value="EN REVISION" '+(c.estado==="EN REVISION"?'selected':'')+'>EN REVISIÓN</option><option value="REQUIERE DATOS" '+(c.estado==="REQUIERE DATOS"?'selected':'')+'>REQUIERE INFORMACIÓN</option><option '+(c.estado==="REINGRESADO"?'selected':'')+'>REINGRESADO</option><option '+(c.estado==="APROBADA"?'selected':'')+'>APROBADA</option><option '+(c.estado==="RECHAZADA"?'selected':'')+'>RECHAZADA</option></select><button data-save="'+esc(c.id)+'">Guardar</button></div><div class="msg">'+(c.detalle?'<strong>Detalle:</strong> '+esc(c.detalle):'')+'</div></td><td class="pdfs">'+(c.pdf_stage1?'<a href="/api/admin/pdf/'+encodeURIComponent(c.id)+'/stage1" target="_blank">Paso 1</a>':'')+(c.pdf_final?'<a href="/api/admin/pdf/'+encodeURIComponent(c.id)+'/final" target="_blank">Paso 2</a>':'')+'</td></tr>').join("");q("#rows").querySelectorAll("[data-save]").forEach(b=>b.onclick=()=>saveControl(b.dataset.save))}
-async function loadSellers(){const r=await fetch("/api/admin/sellers"),d=await r.json();if(!r.ok)return;for(const v of d.sellers||[]){const o=document.createElement("option");o.value=v.id;o.textContent=v.name;q("#fSeller").appendChild(o)}}
+function tdClass(k){return ["updated_at","dpi","nit","telefono","proceso","estado"].includes(k)?"compact":k==="nombre"?"client":""}
+function render(){q("#headRow").innerHTML=visible.map(k=>'<th>'+esc(defs[k])+'</th>').join("")+'<th>Control</th><th>PDF</th><th>Acciones</th>';q("#rows").innerHTML=dataRows.map(c=>'<tr>'+visible.map(k=>'<td class="'+tdClass(k)+'">'+esc(display(c,k))+'</td>').join("")+'<td class="control-cell"><div class="actions"><select data-proc="'+esc(c.id)+'"><option value="PRECALIFICACION" '+(c.proceso==="PRECALIFICACION"?'selected':'')+'>Precalificación</option><option value="FORMALIZACION DE CREDITO" '+(c.proceso==="FORMALIZACION DE CREDITO"?'selected':'')+'>Formalización</option></select><select data-state="'+esc(c.id)+'"><option '+(c.estado==="SUBIDA"?'selected':'')+'>SUBIDA</option><option value="EN REVISION" '+(c.estado==="EN REVISION"?'selected':'')+'>EN REVISIÓN</option><option value="REQUIERE DATOS" '+(c.estado==="REQUIERE DATOS"?'selected':'')+'>REQUIERE INFORMACIÓN</option><option '+(c.estado==="REINGRESADO"?'selected':'')+'>REINGRESADO</option><option '+(c.estado==="APROBADA"?'selected':'')+'>APROBADA</option><option '+(c.estado==="RECHAZADA"?'selected':'')+'>RECHAZADA</option></select><button data-save="'+esc(c.id)+'">Guardar</button></div><div class="msg">'+(c.detalle?'<strong>Detalle:</strong> '+esc(c.detalle):'')+(c.procede?'<div class="procede"><strong>Procede:</strong> '+esc(c.procede)+'</div>':'')+(c.cerrado?'<div class="closed">Expediente cerrado</div>':'')+'</div></td><td class="pdfs">'+(c.pdf_stage1?'<a href="/api/admin/pdf/'+encodeURIComponent(c.id)+'/stage1" target="_blank">P1</a>':'')+(c.pdf_final?'<a href="/api/admin/pdf/'+encodeURIComponent(c.id)+'/final" target="_blank">P2</a>':'')+'</td><td><div class="actions"><button data-edit="'+esc(c.id)+'" class="secondary">Editar</button><button data-delete="'+esc(c.id)+'" class="danger">Eliminar</button></div></td></tr>').join("");q("#rows").querySelectorAll("[data-save]").forEach(b=>b.onclick=()=>saveControl(b.dataset.save));q("#rows").querySelectorAll("[data-edit]").forEach(b=>b.onclick=()=>location.href="/?admin=1&case_id="+encodeURIComponent(b.dataset.edit));q("#rows").querySelectorAll("[data-delete]").forEach(b=>b.onclick=()=>deleteCase(b.dataset.delete))}
+async function loadSellers(){const r=await fetch("/api/admin/sellers"),d=await r.json();if(!r.ok)return;for(const sel of [q("#fSeller"),q("#newSeller")]){const first=sel.options[0]?.outerHTML||'<option value="">Seleccionar vendedor</option>';sel.innerHTML=first;for(const v of d.sellers||[]){const o=document.createElement("option");o.value=v.id;o.textContent=v.name;sel.appendChild(o)}}}
 function queryUrl(path){const u=new URL(path,location.origin);[["q","#fQ"],["status","#fStatus"],["process","#fProcess"],["seller_id","#fSeller"],["sort","#fSort"]].forEach(([k,s])=>{const v=q(s).value;if(v)u.searchParams.set(k,v)});return u}
 async function search(){const r=await fetch(queryUrl("/api/admin/cases")),d=await r.json();if(r.status===401){q("#loginCard").classList.remove("hidden");q("#adminApp").classList.add("hidden");return}q("#loginCard").classList.add("hidden");q("#adminApp").classList.remove("hidden");dataRows=d.cases||[];render()}
-async function saveControl(id){const state=q('[data-state="'+CSS.escape(id)+'"]').value,process=q('[data-proc="'+CSS.escape(id)+'"]').value;let detail="";if(state==="REQUIERE DATOS")detail=prompt("¿Qué información debe corregir o completar el vendedor?",dataRows.find(x=>x.id===id)?.detalle||"")||"";if(state==="RECHAZADA")detail=prompt("¿Por qué no aplica al crédito?",dataRows.find(x=>x.id===id)?.detalle||"")||"";if((state==="REQUIERE DATOS"||state==="RECHAZADA")&&!detail.trim())return;const r=await fetch("/api/admin/cases/"+encodeURIComponent(id)+"/control",{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({estado:state,proceso:process,detalle})}),d=await r.json();if(!r.ok){alert(d.error||"No se pudo actualizar");return}await search()}
-q("#loginBtn").onclick=async()=>{const r=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({user:q("#adminUser").value,password:q("#adminPass").value})}),d=await r.json();q("#loginMsg").textContent=d.ok?"Ingreso correcto":(d.error||"No autorizado");if(d.ok){await loadSellers();search()}};q("#searchBtn").onclick=search;q("#exportBtn").onclick=()=>{const u=queryUrl("/api/admin/export.xls");u.searchParams.set("fields",visible.join(","));location.href=u};q("#logoutBtn").onclick=async()=>{await fetch("/api/admin/logout",{method:"POST"});location.reload()};["#fQ","#fStatus","#fProcess","#fSeller","#fSort"].forEach(s=>q(s).addEventListener("change",search));initFields();search().then(()=>loadSellers());
+async function saveControl(id){const c=dataRows.find(x=>x.id===id)||{},state=q('[data-state="'+CSS.escape(id)+'"]').value,process=q('[data-proc="'+CSS.escape(id)+'"]').value;let detail="",procede="";if(state==="REQUIERE DATOS")detail=prompt("¿Qué información debe corregir o completar el vendedor?",c.detalle||"")||"";if(state==="RECHAZADA")detail=prompt("¿Por qué no aplica al crédito?",c.detalle||"")||"";if((state==="REQUIERE DATOS"||state==="RECHAZADA")&&!detail.trim())return;if(process==="FORMALIZACION DE CREDITO"&&state==="APROBADA"&&c.tiene_paso2){procede=prompt("¿Qué procede con el cliente?",c.procede||"")||"";if(!procede.trim())return}const r=await fetch("/api/admin/cases/"+encodeURIComponent(id)+"/control",{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({estado:state,proceso:process,detalle,procede})}),d=await r.json();if(!r.ok){alert(d.error||"No se pudo actualizar");return}await search()}
+async function deleteCase(id){const c=dataRows.find(x=>x.id===id);if(!confirm("¿Eliminar definitivamente el expediente de "+(c?.nombre||"este cliente")+"? También se eliminarán sus PDFs guardados."))return;const r=await fetch("/api/admin/cases/"+encodeURIComponent(id),{method:"DELETE"}),d=await r.json();if(!r.ok){alert(d.error||"No se pudo eliminar");return}await search()}
+q("#loginBtn").onclick=async()=>{const r=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({user:q("#adminUser").value,password:q("#adminPass").value})}),d=await r.json();q("#loginMsg").textContent=d.ok?"Ingreso correcto":(d.error||"No autorizado");if(d.ok){await loadSellers();search()}};q("#exitLoginBtn").onclick=()=>location.href="/";q("#newCaseAdminBtn").onclick=()=>{const sid=q("#newSeller").value;if(!sid){alert("Selecciona un vendedor.");return}location.href="/?admin=1&seller_id="+encodeURIComponent(sid)};q("#searchBtn").onclick=search;q("#exportBtn").onclick=()=>{const u=queryUrl("/api/admin/export.xls");u.searchParams.set("fields",visible.join(","));location.href=u};q("#logoutBtn").onclick=async()=>{await fetch("/api/admin/logout",{method:"POST"});location.reload()};["#fQ","#fStatus","#fProcess","#fSeller","#fSort"].forEach(s=>q(s).addEventListener("change",search));initFields();search().then(()=>loadSellers());
 </script></body></html>`;
 
 // -----------------------------
@@ -1777,6 +1787,29 @@ export default {
       return res;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/admin/me") {
+      return (await verifyAdmin(request, env)) ? json({ok:true,admin:true}) : json({ok:false,error:"No autorizado."},401);
+    }
+
+    if (request.method === "GET" && /^\/api\/admin\/cases\/[^/]+$/.test(url.pathname)) {
+      if (!(await verifyAdmin(request, env))) return json({ok:false,error:"No autorizado."},401);
+      const id=decodeURIComponent(url.pathname.split("/").filter(Boolean)[3]||"");const rec=await loadCaseRecord(env,id);if(!rec)return json({ok:false,error:"Expediente no encontrado."},404);
+      return json({ok:true,case:rec,summary:caseSummary(rec)});
+    }
+
+    if (request.method === "DELETE" && /^\/api\/admin\/cases\/[^/]+$/.test(url.pathname)) {
+      if (!(await verifyAdmin(request, env))) return json({ok:false,error:"No autorizado."},401);
+      const id=decodeURIComponent(url.pathname.split("/").filter(Boolean)[3]||"");const rec=await loadCaseRecord(env,id);if(!rec)return json({ok:false,error:"Expediente no encontrado."},404);
+      if (env.CREDIZAS_FILES) {
+        const kinds=["stage1","final"].filter(k=>rec?.pdfs?.[k]);
+        for (const kind of kinds) {
+          const size=Number(rec?.pdf_sizes?.[kind]||0);const quota=await reserveR2Usage(env,{class_a:1,storage_delta:-size});if(!quota.ok)return r2QuotaBlockedResponse(quota);await env.CREDIZAS_FILES.delete(`cases/${id}/${kind}.pdf`);
+        }
+      }
+      await env.CREDIZAS_KV?.delete(CASE_PREFIX+id);
+      return json({ok:true,deleted:id});
+    }
+
     if (request.method === "GET" && url.pathname === "/api/admin/r2-quota") {
       if (!(await verifyAdmin(request, env))) return json({ ok:false, error:"No autorizado." }, 401);
       const usage = await getR2QuotaUsage(env);
@@ -1798,12 +1831,20 @@ export default {
     if (request.method === "PATCH" && /^\/api\/admin\/cases\/[^/]+\/control$/.test(url.pathname)) {
       if (!(await verifyAdmin(request, env))) return json({ok:false,error:"No autorizado."},401);
       const parts=url.pathname.split("/").filter(Boolean),id=decodeURIComponent(parts[3]||"");const rec=await loadCaseRecord(env,id);if(!rec)return json({ok:false,error:"Expediente no encontrado."},404);
-      const body=await request.json(),estado=String(body?.estado||""),proceso=String(body?.proceso||"");let detalle=String(body?.detalle||"").trim();
-      if(!CASE_STATUSES.includes(estado))return json({ok:false,error:"Estado inválido."},400);if(!CASE_PROCESSES.includes(proceso))return json({ok:false,error:"Proceso inválido."},400);
+      const body=await request.json(),estado=String(body?.estado||""),requestedProcess=String(body?.proceso||"");let detalle=String(body?.detalle||"").trim(),procede=String(body?.procede||"").trim();
+      if(!CASE_STATUSES.includes(estado))return json({ok:false,error:"Estado inválido."},400);if(!CASE_PROCESSES.includes(requestedProcess))return json({ok:false,error:"Proceso inválido."},400);
       if(["REQUIERE DATOS","RECHAZADA"].includes(estado)&&!detalle)return json({ok:false,error:"Este estado requiere un detalle."},400);
-      const prevEstado=rec.estado,prevProceso=rec.proceso;rec.estado=estado;rec.proceso=proceso;
-      if(estado==="REQUIERE DATOS")rec.ultimo_requerimiento=detalle;const ctl=currentControlForRecord(rec);if(ctl){ctl.estado=estado;ctl.proceso=proceso;ctl.detalle=detalle||null}
-      addCaseHistory(rec,"ADMIN_CONTROL","admin",{from_state:prevEstado,to_state:estado,from_process:prevProceso,to_process:proceso,detail:detalle||null});await saveCaseRecord(env,rec);return json({ok:true,case:caseSummary(rec)});
+      const formalApproval=Boolean(rec.stage2)&&requestedProcess==="FORMALIZACION DE CREDITO"&&estado==="APROBADA";
+      if(formalApproval&&!procede)return json({ok:false,error:"Al aprobar la Formalización indica qué procede con el cliente."},400);
+      const prevEstado=rec.estado,prevProceso=rec.proceso;
+      let proceso=requestedProcess;
+      if(!rec.stage2&&requestedProcess==="PRECALIFICACION"&&estado==="APROBADA") proceso="FORMALIZACION DE CREDITO";
+      rec.estado=estado;rec.proceso=proceso;
+      if(estado==="REQUIERE DATOS")rec.ultimo_requerimiento=detalle;else if(estado!=="REINGRESADO")rec.ultimo_requerimiento="";
+      if(estado==="RECHAZADA")rec.closed_at=new Date().toISOString();else delete rec.closed_at;
+      if(formalApproval)rec.procede_cliente=procede;
+      const ctl=currentControlForRecord(rec);if(ctl){ctl.estado=estado;ctl.proceso=proceso;ctl.detalle=detalle||null;if(formalApproval)ctl.procede=procede}
+      addCaseHistory(rec,"ADMIN_CONTROL","admin",{from_state:prevEstado,to_state:estado,from_process:prevProceso,to_process:proceso,detail:detalle||null,procede:formalApproval?procede:null});await saveCaseRecord(env,rec);return json({ok:true,case:caseSummary(rec)});
     }
 
     if (request.method === "GET" && url.pathname === "/api/admin/export.xls") {
@@ -1832,15 +1873,15 @@ export default {
     }
 
     if (request.method === "PUT" && url.pathname.startsWith("/api/cases/") && url.pathname.includes("/pdf/")) {
-      const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"No autorizado."},401);
+      const seller=await verifySeller(request,env);const isAdmin=await verifyAdmin(request,env);if(!seller&&!isAdmin)return json({ok:false,error:"No autorizado."},401);
       if (!env.CREDIZAS_FILES) return json({ ok:false, error:"Configura CREDIZAS_FILES para almacenar PDFs." }, 503);
       const parts = url.pathname.split("/").filter(Boolean);
       const id = decodeURIComponent(parts[2]||"");
       const kind = parts[4] === "final" ? "final" : "stage1";
       const pdfBytes = await request.arrayBuffer();
       const rec = await loadCaseRecord(env,id);
-      if(!rec||!sellerOwnsCase(rec,seller))return json({ok:false,error:"Expediente no autorizado."},403);
-      if(!["SUBIDA","REINGRESADO"].includes(rec.estado))return json({ok:false,error:"El PDF está bloqueado porque el expediente ya está en revisión administrativa."},403);
+      if(!rec)return json({ok:false,error:"Expediente no encontrado."},404);if(!isAdmin&&!sellerOwnsCase(rec,seller))return json({ok:false,error:"Expediente no autorizado."},403);
+      if(!isAdmin&&!["SUBIDA","REINGRESADO"].includes(rec.estado))return json({ok:false,error:"El PDF está bloqueado porque el expediente ya está en revisión administrativa."},403);
       const oldSize = Number(rec?.pdf_sizes?.[kind] || 0);
       const newSize = pdfBytes.byteLength;
       const storageDelta = Math.max(0, newSize - oldSize);
@@ -1876,7 +1917,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/stage1/extract") {
       try {
-        const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"Inicia sesión como vendedor."},401);
+        const seller=await verifySeller(request,env);const isAdmin=await verifyAdmin(request,env);if(!seller&&!isAdmin)return json({ok:false,error:"Inicia sesión."},401);
         const fd = await request.formData();
 
         const dpiFront = fd.get("dpi_front");
@@ -1923,7 +1964,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/stage1/submit") {
       try {
-        const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"Inicia sesión como vendedor."},401);
+        const seller=await verifySeller(request,env);const isAdmin=await verifyAdmin(request,env);if(!seller&&!isAdmin)return json({ok:false,error:"Inicia sesión."},401);
         const payload = await request.json();
 
         const basic = payload?.datos_basicos || {};
@@ -2011,10 +2052,16 @@ export default {
         );
 
         const caseId = payload?.expediente?.id || crypto.randomUUID();
-        payload.expediente = payload.expediente || {};payload.expediente.id=caseId;payload.expediente.vendedor=seller.name;payload.expediente.vendedor_id=seller.id;
-        const existing=await loadCaseRecord(env,caseId);if(existing&&!sellerOwnsCase(existing,seller))return json({ok:false,error:"Expediente no autorizado."},403);if(existing&&(existing.proceso!=="PRECALIFICACION"||existing.estado!=="REQUIERE DATOS"))return json({ok:false,error:"Este expediente está bloqueado. El administrador debe marcar Requiere información para habilitar correcciones."},403);
-        const result=await submitInitialValidation(payload,env),isCorrection=Boolean(existing),estado=isCorrection?"REINGRESADO":"SUBIDA",control1={proceso:"PRECALIFICACION",estado,detalle:null};payload.control_etapa1=control1;
-        const rec=existing||{id:caseId,created_at:new Date().toISOString()};rec.vendedor=seller.name;rec.vendedor_id=seller.id;rec.proceso="PRECALIFICACION";rec.estado=estado;rec.stage1={data:payload,control:control1,request_id:result.request_id,decision:{status:result.status,message:result.message||""},submitted_at:new Date().toISOString()};addCaseHistory(rec,isCorrection?"STAGE1_REINGRESADO":"STAGE1_SUBIDA","seller",{seller_id:seller.id,seller:seller.name});await saveCaseRecord(env,rec);
+        payload.expediente = payload.expediente || {};payload.expediente.id=caseId;
+        const existing=await loadCaseRecord(env,caseId);
+        let actorSeller=seller;
+        if(isAdmin){const sid=String(payload.expediente.vendedor_id||existing?.vendedor_id||"");const sr=sid?await kvGetJson(env,SELLER_PREFIX+sid):null;if(!sr)return json({ok:false,error:"Selecciona un vendedor válido."},400);actorSeller={id:sr.id,name:sr.name}}
+        payload.expediente.vendedor=actorSeller.name;payload.expediente.vendedor_id=actorSeller.id;
+        if(existing&&!isAdmin&&!sellerOwnsCase(existing,actorSeller))return json({ok:false,error:"Expediente no autorizado."},403);
+        if(existing&&existing.estado==="RECHAZADA")return json({ok:false,error:"El expediente está rechazado y cerrado. El administrador debe reabrirlo antes de editar."},403);
+        if(existing&&!isAdmin&&(existing.proceso!=="PRECALIFICACION"||existing.estado!=="REQUIERE DATOS"))return json({ok:false,error:"Este expediente está bloqueado. El administrador debe marcar Requiere información para habilitar correcciones."},403);
+        const result=await submitInitialValidation(payload,env),isCorrection=Boolean(existing);let estado=isAdmin&&existing?existing.estado:(isCorrection?"REINGRESADO":"SUBIDA");let proceso=isAdmin&&existing?existing.proceso:"PRECALIFICACION";const control1={proceso,estado,detalle:null};payload.control_etapa1=control1;
+        const rec=existing||{id:caseId,created_at:new Date().toISOString()};rec.vendedor=actorSeller.name;rec.vendedor_id=actorSeller.id;rec.proceso=proceso;rec.estado=estado;rec.stage1={data:payload,control:control1,request_id:result.request_id,decision:{status:result.status,message:result.message||""},submitted_at:new Date().toISOString()};addCaseHistory(rec,isAdmin?(isCorrection?"ADMIN_EDIT_STAGE1":"ADMIN_CREATE_STAGE1"):(isCorrection?"STAGE1_REINGRESADO":"STAGE1_SUBIDA"),isAdmin?"admin":"seller",{seller_id:actorSeller.id,seller:actorSeller.name});await saveCaseRecord(env,rec);
         return json({ok:true,result:{...result,case_id:caseId,estado,persisted:Boolean(env.CREDIZAS_KV)}});
       } catch (e) {
         return json({
@@ -2050,7 +2097,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/stage2/extract") {
       try {
-        const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"Inicia sesión como vendedor."},401);
+        const seller=await verifySeller(request,env);const isAdmin=await verifyAdmin(request,env);if(!seller&&!isAdmin)return json({ok:false,error:"Inicia sesión."},401);
         const fd = await request.formData();
         const selfieFile = fd.get("selfie");
         const utilityFiles = fd.getAll("utility_files").filter(v => v instanceof File);
@@ -2063,7 +2110,7 @@ export default {
           return json({ ok: false, error: "Sube recibo de luz, agua o constancia municipal." }, 400);
         }
 
-        const caseId=String(fd.get("case_id")||"");const rec=await loadCaseRecord(env,caseId);if(!rec||!sellerOwnsCase(rec,seller))return json({ok:false,error:"Expediente no autorizado."},403);if(rec.proceso!=="FORMALIZACION DE CREDITO")return json({ok:false,error:"El administrador todavía no ha habilitado la Formalización de crédito."},403);if(rec.stage2&&rec.estado!=="REQUIERE DATOS")return json({ok:false,error:"El Paso 2 está bloqueado. El administrador debe marcar Requiere información para corregirlo."},403);
+        const caseId=String(fd.get("case_id")||"");const rec=await loadCaseRecord(env,caseId);if(!rec)return json({ok:false,error:"Expediente no encontrado."},404);if(!isAdmin&&!sellerOwnsCase(rec,seller))return json({ok:false,error:"Expediente no autorizado."},403);if(rec.estado==="RECHAZADA")return json({ok:false,error:"El expediente está rechazado y cerrado."},403);if(rec.proceso!=="FORMALIZACION DE CREDITO")return json({ok:false,error:"El administrador todavía no ha habilitado la Formalización de crédito."},403);if(!isAdmin&&rec.stage2&&rec.estado!=="REQUIERE DATOS")return json({ok:false,error:"El Paso 2 está bloqueado. El administrador debe marcar Requiere información para corregirlo."},403);
         const stage1Data = rec.stage1?.data || {};
 
         const source = stage1Data?.informacion_complementaria?.fuente_ingresos;
@@ -2100,16 +2147,16 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/final/submit") {
       try {
-        const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"Inicia sesión como vendedor."},401);
+        const seller=await verifySeller(request,env);const isAdmin=await verifyAdmin(request,env);if(!seller&&!isAdmin)return json({ok:false,error:"Inicia sesión."},401);
         const payload = await request.json();
         if (!payload?.workflow?.reviewed_by_user) return json({ ok: false, error: "Falta confirmación de revisión humana." }, 400);
-        const caseId=payload?.stage1?.expediente?.id||payload?.stage2?.expediente?.id;const existing=await loadCaseRecord(env,caseId);if(!existing||!sellerOwnsCase(existing,seller))return json({ok:false,error:"Expediente no autorizado."},403);if(existing.proceso!=="FORMALIZACION DE CREDITO")return json({ok:false,error:"El administrador todavía no habilita el Paso 2."},403);if(existing.stage2&&existing.estado!=="REQUIERE DATOS")return json({ok:false,error:"El Paso 2 está bloqueado hasta que el administrador solicite información."},403);
+        const caseId=payload?.stage1?.expediente?.id||payload?.stage2?.expediente?.id;const existing=await loadCaseRecord(env,caseId);if(!existing)return json({ok:false,error:"Expediente no encontrado."},404);if(!isAdmin&&!sellerOwnsCase(existing,seller))return json({ok:false,error:"Expediente no autorizado."},403);if(existing.estado==="RECHAZADA")return json({ok:false,error:"El expediente está rechazado y cerrado."},403);if(existing.proceso!=="FORMALIZACION DE CREDITO")return json({ok:false,error:"El administrador todavía no habilita el Paso 2."},403);if(!isAdmin&&existing.stage2&&existing.estado!=="REQUIERE DATOS")return json({ok:false,error:"El Paso 2 está bloqueado hasta que el administrador solicite información."},403);
         const phone = payload?.stage2?.digitacion?.telefono_empresa;
         if (phone && !/^\d{8}$/.test(String(phone))) return json({ ok:false, error:"El teléfono de empresa/actividad debe tener exactamente 8 dígitos." }, 400);
         for (const [i, ref] of (payload?.stage2?.referencias || []).entries()) {
           if (!/^\d{8}$/.test(String(ref?.celular || ""))) return json({ ok:false, error:`Referencia ${i+1}: el celular debe tener exactamente 8 dígitos.` }, 400);
         }
-        payload.stage2.expediente={id:caseId,vendedor:seller.name,vendedor_id:seller.id};const isCorrection=Boolean(existing.stage2),estado=isCorrection?"REINGRESADO":"SUBIDA",control2={proceso:"FORMALIZACION DE CREDITO",estado,detalle:null};payload.stage2.control_etapa2=control2;const result=await submitFinal(payload,env);existing.proceso="FORMALIZACION DE CREDITO";existing.estado=estado;existing.stage2={data:payload.stage2,control:control2,submitted_at:new Date().toISOString()};addCaseHistory(existing,isCorrection?"STAGE2_REINGRESADO":"STAGE2_SUBIDA","seller",{seller_id:seller.id,seller:seller.name});await saveCaseRecord(env,existing);return json({ok:true,result:{...result,case_id:caseId,estado,persisted:Boolean(env.CREDIZAS_KV)}});
+        const actorSeller=isAdmin?{id:existing.vendedor_id,name:existing.vendedor}:seller;payload.stage2.expediente={id:caseId,vendedor:actorSeller.name,vendedor_id:actorSeller.id};const isCorrection=Boolean(existing.stage2);let estado=isAdmin&&isCorrection?existing.estado:(isCorrection?"REINGRESADO":"SUBIDA"),control2={proceso:"FORMALIZACION DE CREDITO",estado,detalle:null};payload.stage2.control_etapa2=control2;const result=await submitFinal(payload,env);existing.proceso="FORMALIZACION DE CREDITO";existing.estado=estado;existing.stage2={data:payload.stage2,control:control2,submitted_at:new Date().toISOString()};addCaseHistory(existing,isAdmin?(isCorrection?"ADMIN_EDIT_STAGE2":"ADMIN_CREATE_STAGE2"):(isCorrection?"STAGE2_REINGRESADO":"STAGE2_SUBIDA"),isAdmin?"admin":"seller",{seller_id:actorSeller.id,seller:actorSeller.name});await saveCaseRecord(env,existing);return json({ok:true,result:{...result,case_id:caseId,estado,persisted:Boolean(env.CREDIZAS_KV)}});
       } catch (e) {
         return json({ ok: false, error: e?.message || "Error en envío final." }, 500);
       }
