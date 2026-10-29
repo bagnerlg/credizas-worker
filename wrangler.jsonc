@@ -5,16 +5,17 @@
   "compatibility_date": "2026-10-29",
   "workers_dev": true,
 
-  // Wrangler auto-provisionará estos recursos la primera vez.
-  // Luego el workflow persistirá automáticamente los IDs/nombres generados.
   "kv_namespaces": [
     {
-      "binding": "CREDIZAS_KV"
+      "binding": "CREDIZAS_KV",
+      "id": "687ee918c3874967b00d1f1898103cfb"
     }
   ],
+
   "r2_buckets": [
     {
-      "binding": "CREDIZAS_FILES"
+      "binding": "CREDIZAS_FILES",
+      "bucket_name": "datosform-credizas-files"
     }
   ],
 
