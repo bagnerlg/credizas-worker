@@ -1,8 +1,11 @@
 {
   "name": "credizas-worker",
-  "version": "1.0.0",
+  "version": "19.2.0",
   "private": true,
+  "type": "module",
   "scripts": {
+    "check": "node --check src/index.js",
+    "dev": "wrangler dev",
     "deploy": "wrangler r2 bucket create datosform-credizas-files || true && wrangler deploy"
   },
   "devDependencies": {

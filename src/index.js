@@ -14,6 +14,111 @@ const ZASHOME_CATALOG_URL = "https://api.zashome.dpdns.org/api/integrations/exce
 const CASE_PREFIX = "case:";
 const VENDORS_KEY = "config:vendors";
 
+
+// -----------------------------
+// PROTECCIÓN DE CUOTA R2
+// Cortacircuito interno al 80% del nivel gratuito de R2 Standard.
+// Se usa una ventana móvil de 31 días para operaciones y un contador
+// conservador de bytes almacenados por esta aplicación.
+// -----------------------------
+const R2_QUOTA_DEFAULTS = {
+  storage_bytes: 8_000_000_000, // 80% de 10 GB
+  class_a_31d: 800_000,         // 80% de 1,000,000
+  class_b_31d: 8_000_000        // 80% de 10,000,000
+};
+const R2_QUOTA_PREFIX = "quota:r2:";
+
+function r2QuotaLimits(env) {
+  const num = (v, fallback) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : fallback; };
+  return {
+    storage_bytes: num(env.R2_MAX_STORAGE_BYTES, R2_QUOTA_DEFAULTS.storage_bytes),
+    class_a_31d: num(env.R2_MAX_CLASS_A_31D, R2_QUOTA_DEFAULTS.class_a_31d),
+    class_b_31d: num(env.R2_MAX_CLASS_B_31D, R2_QUOTA_DEFAULTS.class_b_31d)
+  };
+}
+
+function r2QuotaEnabled(env) {
+  return String(env.R2_QUOTA_ENABLED ?? "true").toLowerCase() !== "false";
+}
+
+function utcDayKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function recentUtcDays(count = 31) {
+  const out = [];
+  const now = new Date();
+  now.setUTCHours(0,0,0,0);
+  for (let i = 0; i < count; i++) {
+    const d = new Date(now.getTime() - i * 86400000);
+    out.push(utcDayKey(d));
+  }
+  return out;
+}
+
+async function getR2QuotaUsage(env) {
+  const limits = r2QuotaLimits(env);
+  if (!env.CREDIZAS_KV) {
+    return { ok:false, blocked:true, reason:"CREDIZAS_KV no disponible para controlar la cuota R2.", limits, storage_bytes:0, class_a_31d:0, class_b_31d:0 };
+  }
+  const storage = await kvGetJson(env, R2_QUOTA_PREFIX + "storage") || { bytes:0 };
+  let classA = 0, classB = 0;
+  for (const day of recentUtcDays(31)) {
+    const row = await kvGetJson(env, R2_QUOTA_PREFIX + "day:" + day);
+    if (!row) continue;
+    classA += Number(row.class_a || 0);
+    classB += Number(row.class_b || 0);
+  }
+  const storageBytes = Math.max(0, Number(storage.bytes || 0));
+  const blocked = storageBytes >= limits.storage_bytes || classA >= limits.class_a_31d || classB >= limits.class_b_31d;
+  return {
+    ok:true, blocked,
+    reason: blocked ? "R2 bloqueado preventivamente: se alcanzó el límite interno de seguridad (80%)." : null,
+    storage_bytes: storageBytes,
+    class_a_31d: classA,
+    class_b_31d: classB,
+    pct_storage: Math.min(100, storageBytes / limits.storage_bytes * 80),
+    pct_class_a: Math.min(100, classA / limits.class_a_31d * 80),
+    pct_class_b: Math.min(100, classB / limits.class_b_31d * 80),
+    limits
+  };
+}
+
+async function reserveR2Usage(env, { class_a = 0, class_b = 0, storage_delta = 0 } = {}) {
+  if (!r2QuotaEnabled(env)) return { ok:true, disabled:true };
+  const usage = await getR2QuotaUsage(env);
+  if (!usage.ok) return usage;
+  const next = {
+    storage_bytes: Math.max(0, usage.storage_bytes + Number(storage_delta || 0)),
+    class_a_31d: usage.class_a_31d + Number(class_a || 0),
+    class_b_31d: usage.class_b_31d + Number(class_b || 0)
+  };
+  if (next.storage_bytes > usage.limits.storage_bytes) return { ok:false, blocked:true, reason:"R2 detenido: el almacenamiento alcanzaría el 80% de la cuota gratuita.", usage, next };
+  if (next.class_a_31d > usage.limits.class_a_31d) return { ok:false, blocked:true, reason:"R2 detenido: las operaciones Clase A alcanzarían el 80% de la cuota gratuita.", usage, next };
+  if (next.class_b_31d > usage.limits.class_b_31d) return { ok:false, blocked:true, reason:"R2 detenido: las operaciones Clase B alcanzarían el 80% de la cuota gratuita.", usage, next };
+
+  const dayKey = R2_QUOTA_PREFIX + "day:" + utcDayKey();
+  const day = await kvGetJson(env, dayKey) || { class_a:0, class_b:0 };
+  day.class_a = Number(day.class_a || 0) + Number(class_a || 0);
+  day.class_b = Number(day.class_b || 0) + Number(class_b || 0);
+  day.updated_at = new Date().toISOString();
+  await kvPutJson(env, dayKey, day, { expirationTtl: 40 * 86400 });
+
+  if (storage_delta) {
+    await kvPutJson(env, R2_QUOTA_PREFIX + "storage", { bytes:next.storage_bytes, updated_at:new Date().toISOString() });
+  }
+  return { ok:true, usage:next, limits:usage.limits };
+}
+
+function r2QuotaBlockedResponse(result) {
+  return json({
+    ok:false,
+    error: result?.reason || "R2 bloqueado por protección de cuota.",
+    code:"R2_QUOTA_GUARD",
+    quota: result?.usage || result?.next || null
+  }, 507);
+}
+
 // -----------------------------
 // CAMPOS ETAPA 1: PRECALIFICACIÓN
 // Solo identidad extraíble del DPI.
@@ -1465,6 +1570,12 @@ export default {
       return res;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/admin/r2-quota") {
+      if (!(await verifyAdmin(request, env))) return json({ ok:false, error:"No autorizado." }, 401);
+      const usage = await getR2QuotaUsage(env);
+      return json({ ok:true, quota_enabled:r2QuotaEnabled(env), ...usage });
+    }
+
     if (request.method === "GET" && url.pathname === "/api/admin/cases") {
       if (!(await verifyAdmin(request, env))) return json({ ok:false, error:"No autorizado." }, 401);
       const records = await listCaseRecords(env, { q:url.searchParams.get("q")||"", seller:url.searchParams.get("seller")||"", status:url.searchParams.get("status")||"", process:url.searchParams.get("process")||"", sort:url.searchParams.get("sort")||"updated_desc" });
@@ -1477,6 +1588,8 @@ export default {
       const parts = url.pathname.split("/").filter(Boolean);
       const id = decodeURIComponent(parts[3]||"");
       const kind = parts[4] === "final" ? "final" : "stage1";
+      const quota = await reserveR2Usage(env, { class_b:1 });
+      if (!quota.ok) return r2QuotaBlockedResponse(quota);
       const obj = await env.CREDIZAS_FILES.get(`cases/${id}/${kind}.pdf`);
       if (!obj) return json({ ok:false, error:"PDF no encontrado." }, 404);
       const rec = await loadCaseRecord(env,id); const name = String(rec?.stage1?.data?.datos_basicos?.nombre_completo || id).replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _.-]/g," ").replace(/\s+/g," ").trim();
@@ -1488,10 +1601,22 @@ export default {
       const parts = url.pathname.split("/").filter(Boolean);
       const id = decodeURIComponent(parts[2]||"");
       const kind = parts[4] === "final" ? "final" : "stage1";
-      await env.CREDIZAS_FILES.put(`cases/${id}/${kind}.pdf`, request.body, { httpMetadata:{ contentType:"application/pdf" } });
+      const pdfBytes = await request.arrayBuffer();
       const rec = await loadCaseRecord(env,id);
-      if (rec) { rec.pdfs = rec.pdfs || {}; rec.pdfs[kind] = true; await saveCaseRecord(env,rec); }
-      return json({ ok:true });
+      const oldSize = Number(rec?.pdf_sizes?.[kind] || 0);
+      const newSize = pdfBytes.byteLength;
+      const storageDelta = Math.max(0, newSize - oldSize);
+      const quota = await reserveR2Usage(env, { class_a:1, storage_delta:storageDelta });
+      if (!quota.ok) return r2QuotaBlockedResponse(quota);
+      await env.CREDIZAS_FILES.put(`cases/${id}/${kind}.pdf`, pdfBytes, { httpMetadata:{ contentType:"application/pdf" } });
+      if (rec) {
+        rec.pdfs = rec.pdfs || {};
+        rec.pdf_sizes = rec.pdf_sizes || {};
+        rec.pdfs[kind] = true;
+        rec.pdf_sizes[kind] = newSize;
+        await saveCaseRecord(env,rec);
+      }
+      return json({ ok:true, stored_bytes:newSize });
     }
 
     if (request.method === "GET" && url.pathname === "/") return html(APP_HTML);
@@ -1505,6 +1630,8 @@ export default {
         initial_endpoint_configured: Boolean(env.INITIAL_VALIDATION_URL),
         final_endpoint_configured: Boolean(env.FINAL_SYSTEM_URL),
         image_detail: env.IMAGE_DETAIL || "high",
+        r2_quota_guard_enabled: r2QuotaEnabled(env),
+        r2_quota_guard_storage_bytes: r2QuotaLimits(env).storage_bytes,
         stage1_client_conversion: "jpeg-1800px"
       });
     }

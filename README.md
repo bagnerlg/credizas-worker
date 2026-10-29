@@ -1,48 +1,92 @@
-# CrediZas Worker
+# CrediZas Worker · V19.2
 
-Worker de CrediZas administrado con GitHub + Wrangler.
+Repositorio para desplegar `datosform` directamente desde **Cloudflare Workers Builds**.
 
-## Arquitectura
+## Estructura
 
-- Cloudflare Worker: `datosform`
-- KV binding: `CREDIZAS_KV`
-- R2 binding: `CREDIZAS_FILES`
-- OpenAI: extracción documental
-- ZasHome: catálogo público/solo lectura
-- GitHub Actions: despliegue automático a producción
-
-## Primer despliegue sin usar la UI de Cloudflare
-
-Necesitas GitHub CLI (`gh`) y una sesión válida de GitHub.
-
-```powershell
-gh auth login
-gh repo create jaime7au/credizas-worker --private --source . --remote origin --push
+```text
+credizas-worker/
+├─ src/
+│  └─ index.js
+├─ package.json
+├─ wrangler.jsonc
+├─ .gitignore
+└─ README.md
 ```
 
-Agrega los secretos del repositorio desde terminal:
+## Configuración de Cloudflare Builds
 
-```powershell
-gh secret set CLOUDFLARE_ACCOUNT_ID -R jaime7au/credizas-worker
-gh secret set CLOUDFLARE_API_TOKEN -R jaime7au/credizas-worker
-gh secret set OPENAI_API_KEY -R jaime7au/credizas-worker
-gh secret set ZASHOME_API_KEY -R jaime7au/credizas-worker
-gh secret set ADMIN_USER -R jaime7au/credizas-worker
-gh secret set ADMIN_PASSWORD -R jaime7au/credizas-worker
-gh secret set ADMIN_SESSION_SECRET -R jaime7au/credizas-worker
+- Rama de producción: `main`
+- Directorio raíz: `/`
+- Comando de compilación: ninguno
+- Comando de implementación: `npm run deploy`
+- Compilaciones de vista previa: opcionales
+
+El script de deployment ejecuta:
+
+```bash
+wrangler r2 bucket create datosform-credizas-files || true && wrangler deploy
 ```
 
-Al hacer push a `main`, GitHub Actions ejecutará `wrangler deploy`.
+Con R2 ya habilitado, la primera ejecución crea `datosform-credizas-files` si todavía no existe. Las siguientes continúan aunque el bucket ya exista.
 
-La primera ejecución deja que Wrangler aprovisione automáticamente KV y R2. Si Wrangler escribe los IDs/nombres de los recursos en `wrangler.jsonc`, el workflow los commitea de vuelta al repo para que despliegues futuros sean deterministas.
+## Bindings
 
-## Desarrollo local
+- KV: `CREDIZAS_KV`
+  - ID: `687ee918c3874967b00d1f1898103cfb`
+- R2: `CREDIZAS_FILES`
+  - Bucket: `datosform-credizas-files`
+
+## Protección R2 al 80%
+
+La aplicación incorpora un cortacircuito interno para CrediZas:
+
+- almacenamiento: `8,000,000,000` bytes
+- Clase A en 31 días: `800,000`
+- Clase B en 31 días: `8,000,000`
+
+Variables en `wrangler.jsonc`:
+
+```text
+R2_QUOTA_ENABLED=true
+R2_MAX_STORAGE_BYTES=8000000000
+R2_MAX_CLASS_A_31D=800000
+R2_MAX_CLASS_B_31D=8000000
+```
+
+## Secrets necesarios en runtime
+
+No los escribas en GitHub ni en `wrangler.jsonc`:
+
+```text
+OPENAI_API_KEY
+ZASHOME_API_KEY
+ADMIN_USER
+ADMIN_PASSWORD
+ADMIN_SESSION_SECRET
+```
+
+Se pueden cargar una vez desde un equipo autenticado con Wrangler:
+
+```bash
+npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put ZASHOME_API_KEY
+npx wrangler secret put ADMIN_USER
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put ADMIN_SESSION_SECRET
+```
+
+## Variables no secretas
+
+Actualmente `VENDEDORES_JSON` queda como `[]`. Sustituye ese valor cuando tengas la lista definitiva de vendedores o adminístralos desde la aplicación cuando se implemente esa pantalla.
+
+## Validación local
 
 ```bash
 npm install
-npx wrangler login
-npm run dev
+npm run check
 ```
 
-Los secretos locales deben vivir en `.dev.vars` y nunca subirse a GitHub.
-#
+## Importante
+
+Este repositorio **no incluye GitHub Actions**. El deployment se hace únicamente con la integración GitHub → Cloudflare Workers Builds para evitar deployments dobles.

@@ -23,6 +23,11 @@
     "OPENAI_MODEL": "gpt-5.4-mini",
     "IMAGE_DETAIL": "high",
     "PDF_DETAIL": "high",
-    "VENDEDORES_JSON": "[]"
+    "VENDEDORES_JSON": "[]",
+
+    "R2_QUOTA_ENABLED": "true",
+    "R2_MAX_STORAGE_BYTES": "8000000000",
+    "R2_MAX_CLASS_A_31D": "800000",
+    "R2_MAX_CLASS_B_31D": "8000000"
   }
 }
