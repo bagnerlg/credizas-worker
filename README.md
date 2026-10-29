@@ -1,92 +1,53 @@
-# CrediZas Worker · V19.2
+# CrediZas Worker · V20
 
-Repositorio para desplegar `datosform` directamente desde **Cloudflare Workers Builds**.
+Worker de CrediZas desplegado desde GitHub directamente con Cloudflare Workers Builds.
 
-## Estructura
+## Cambios principales V20
 
-```text
-credizas-worker/
-├─ src/
-│  └─ index.js
-├─ package.json
-├─ wrangler.jsonc
-├─ .gitignore
-└─ README.md
-```
+- Acceso de vendedores por nombre + PIN de 4 dígitos.
+- Alta de vendedor desde la propia aplicación.
+- PIN guardado como hash firmado en KV; no se guarda en texto plano.
+- Protección contra intentos repetidos de PIN.
+- Cada vendedor solo ve sus expedientes.
+- Después de enviar un paso, el expediente queda bloqueado para el vendedor.
+- El vendedor solo puede corregir cuando el administrador marca `REQUIERE DATOS`.
+- Al reenviar una corrección, el estado pasa automáticamente a `REINGRESADO`.
+- El administrador controla estado y proceso.
+- Procesos: `PRECALIFICACION` y `FORMALIZACION DE CREDITO`.
+- Estados: `SUBIDA`, `EN REVISION`, `REQUIERE DATOS`, `REINGRESADO`, `APROBADA`, `RECHAZADA`.
+- Producto ZasHome mostrado como tarjeta con imagen, SKU y monto solicitado.
+- Precio catálogo y cálculo del 50% ocultos al vendedor y no enviados al navegador.
+- Panel `/admin` con filtros, columnas seleccionables, cambio rápido de estado/proceso y PDFs por paso.
+- Exportación administrativa a Excel compatible (`.xls`).
+- Protección R2 al 80% conservada.
 
-## Configuración de Cloudflare Builds
+## Cloudflare Builds
 
-- Rama de producción: `main`
+- Rama: `main`
 - Directorio raíz: `/`
 - Comando de compilación: ninguno
 - Comando de implementación: `npm run deploy`
-- Compilaciones de vista previa: opcionales
-
-El script de deployment ejecuta:
-
-```bash
-wrangler r2 bucket create datosform-credizas-files || true && wrangler deploy
-```
-
-Con R2 ya habilitado, la primera ejecución crea `datosform-credizas-files` si todavía no existe. Las siguientes continúan aunque el bucket ya exista.
 
 ## Bindings
 
 - KV: `CREDIZAS_KV`
-  - ID: `687ee918c3874967b00d1f1898103cfb`
 - R2: `CREDIZAS_FILES`
-  - Bucket: `datosform-credizas-files`
 
-## Protección R2 al 80%
+## Secrets runtime
 
-La aplicación incorpora un cortacircuito interno para CrediZas:
+Deben permanecer como Secrets del Worker:
 
-- almacenamiento: `8,000,000,000` bytes
-- Clase A en 31 días: `800,000`
-- Clase B en 31 días: `8,000,000`
+- `OPENAI_API_KEY`
+- `ZASHOME_API_KEY` (si el endpoint requiere Bearer)
+- `ADMIN_USER`
+- `ADMIN_PASSWORD`
+- `ADMIN_SESSION_SECRET`
 
-Variables en `wrangler.jsonc`:
+`ADMIN_SESSION_SECRET` también se usa para firmar las sesiones de vendedores y el hash de sus PIN.
 
-```text
-R2_QUOTA_ENABLED=true
-R2_MAX_STORAGE_BYTES=8000000000
-R2_MAX_CLASS_A_31D=800000
-R2_MAX_CLASS_B_31D=8000000
-```
+## Uso
 
-## Secrets necesarios en runtime
+- `/` → ingreso de vendedor y solicitudes.
+- `/admin` → panel administrativo.
 
-No los escribas en GitHub ni en `wrangler.jsonc`:
-
-```text
-OPENAI_API_KEY
-ZASHOME_API_KEY
-ADMIN_USER
-ADMIN_PASSWORD
-ADMIN_SESSION_SECRET
-```
-
-Se pueden cargar una vez desde un equipo autenticado con Wrangler:
-
-```bash
-npx wrangler secret put OPENAI_API_KEY
-npx wrangler secret put ZASHOME_API_KEY
-npx wrangler secret put ADMIN_USER
-npx wrangler secret put ADMIN_PASSWORD
-npx wrangler secret put ADMIN_SESSION_SECRET
-```
-
-## Variables no secretas
-
-Actualmente `VENDEDORES_JSON` queda como `[]`. Sustituye ese valor cuando tengas la lista definitiva de vendedores o adminístralos desde la aplicación cuando se implemente esa pantalla.
-
-## Validación local
-
-```bash
-npm install
-npm run check
-```
-
-## Importante
-
-Este repositorio **no incluye GitHub Actions**. El deployment se hace únicamente con la integración GitHub → Cloudflare Workers Builds para evitar deployments dobles.
+El administrador habilita el Paso 2 cambiando el proceso del expediente a `FORMALIZACION DE CREDITO`.

@@ -12,7 +12,12 @@
 const MODEL_DEFAULT = "gpt-5.4-mini";
 const ZASHOME_CATALOG_URL = "https://api.zashome.dpdns.org/api/integrations/excel/catalog";
 const CASE_PREFIX = "case:";
-const VENDORS_KEY = "config:vendors";
+const VENDORS_KEY = "config:vendors"; // compatibilidad legado
+const SELLER_PREFIX = "seller:";
+const SELLER_FAIL_PREFIX = "sellerfail:";
+const SELLER_COOKIE = "credizas_seller";
+const CASE_STATUSES = ["SUBIDA","EN REVISION","REQUIERE DATOS","REINGRESADO","APROBADA","RECHAZADA"];
+const CASE_PROCESSES = ["PRECALIFICACION","FORMALIZACION DE CREDITO"];
 
 
 // -----------------------------
@@ -928,17 +933,33 @@ async function getVendors(env) {
 function caseSummary(record) {
   const s1 = record?.stage1?.data || {};
   const b = s1?.datos_basicos || {};
+  const sol = s1?.solicitud || {};
+  const comp = s1?.informacion_complementaria || {};
+  const currentControl = record?.proceso === "FORMALIZACION DE CREDITO" && record?.stage2
+    ? (record.stage2.control || {})
+    : (record?.stage1?.control || {});
   return {
     id: record?.id,
+    vendedor_id: record?.vendedor_id || "",
     vendedor: record?.vendedor || "",
     nombre: b?.nombre_completo || "",
     dpi: b?.numero_dpi || "",
     nit: b?.nit || "",
     telefono: b?.numero_celular || "",
+    producto: sol?.producto_solicitado || "",
+    producto_sku: sol?.producto_sku || "",
+    precio_catalogo: Number(sol?.producto_precio_catalogo || 0),
+    monto: Number(sol?.monto_total_solicitado || 0),
+    ingreso: Number(comp?.ingreso_promedio_mensual || 0),
     proceso: record?.proceso || (record?.stage2 ? "FORMALIZACION DE CREDITO" : "PRECALIFICACION"),
     estado: record?.estado || record?.stage2?.control?.estado || record?.stage1?.control?.estado || "SUBIDA",
+    detalle: currentControl?.detalle || record?.ultimo_requerimiento || "",
     updated_at: record?.updated_at || record?.created_at || null,
     created_at: record?.created_at || null,
+    stage1_submitted_at: record?.stage1?.submitted_at || null,
+    stage2_submitted_at: record?.stage2?.submitted_at || null,
+    tiene_paso1: Boolean(record?.stage1),
+    tiene_paso2: Boolean(record?.stage2),
     pdf_stage1: Boolean(record?.pdfs?.stage1),
     pdf_final: Boolean(record?.pdfs?.final)
   };
@@ -1029,6 +1050,124 @@ async function verifyAdmin(request, env) {
     const data = JSON.parse(atob(padded));
     return data.exp > Date.now() && data.u === (env.ADMIN_USER || "admin");
   } catch { return false; }
+}
+
+
+function normalizeSellerName(v) {
+  return String(v || "").trim().replace(/\s+/g, " ");
+}
+
+async function listSellers(env) {
+  if (!env.CREDIZAS_KV) return [];
+  const listed = await env.CREDIZAS_KV.list({ prefix: SELLER_PREFIX, limit: 500 });
+  const out = [];
+  for (const key of listed.keys || []) {
+    const row = await kvGetJson(env, key.name);
+    if (row?.id && row?.name && row.active !== false) out.push({ id:row.id, name:row.name, created_at:row.created_at || null });
+  }
+  out.sort((a,b) => a.name.localeCompare(b.name, "es"));
+  return out;
+}
+
+async function sellerPinHash(env, sellerId, pin) {
+  const secret = env.ADMIN_SESSION_SECRET || env.ADMIN_PASSWORD || "credizas-local-secret";
+  return hmacHex(secret, `seller:${sellerId}:${pin}`);
+}
+
+async function createSellerToken(env, seller) {
+  const secret = env.ADMIN_SESSION_SECRET || env.ADMIN_PASSWORD || "";
+  if (!secret) throw new Error("Configura ADMIN_SESSION_SECRET.");
+  const payload = btoa(JSON.stringify({ sid:seller.id, n:seller.name, exp:Date.now()+12*60*60*1000 })).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/g,"");
+  return payload + "." + await hmacHex(secret, payload);
+}
+
+async function verifySeller(request, env) {
+  const token = cookieMap(request)[SELLER_COOKIE];
+  if (!token) return null;
+  const [payload, sig] = token.split(".");
+  if (!payload || !sig) return null;
+  const secret = env.ADMIN_SESSION_SECRET || env.ADMIN_PASSWORD || "";
+  if (!secret || await hmacHex(secret, payload) !== sig) return null;
+  try {
+    const padded = payload.replace(/-/g,"+").replace(/_/g,"/") + "===".slice((payload.length+3)%4);
+    const data = JSON.parse(atob(padded));
+    if (!(data.exp > Date.now()) || !data.sid) return null;
+    const seller = await kvGetJson(env, SELLER_PREFIX + data.sid);
+    if (!seller || seller.active === false) return null;
+    return { id:seller.id, name:seller.name };
+  } catch { return null; }
+}
+
+function sellerOwnsCase(record, seller) {
+  if (!record || !seller) return false;
+  if (record.vendedor_id) return String(record.vendedor_id) === String(seller.id);
+  return normalizeSellerName(record.vendedor).toLowerCase() === normalizeSellerName(seller.name).toLowerCase();
+}
+
+function sellerCasePermissions(record) {
+  const process = record?.proceso || "PRECALIFICACION";
+  const state = record?.estado || "SUBIDA";
+  const has1 = Boolean(record?.stage1);
+  const has2 = Boolean(record?.stage2);
+  return {
+    edit_stage1: process === "PRECALIFICACION" && has1 && state === "REQUIERE DATOS",
+    start_stage2: process === "FORMALIZACION DE CREDITO" && has1 && !has2,
+    edit_stage2: process === "FORMALIZACION DE CREDITO" && has2 && state === "REQUIERE DATOS",
+    view_stage1: has1,
+    view_stage2: process === "FORMALIZACION DE CREDITO" && has1,
+    requirement: state === "REQUIERE DATOS" ? (record?.ultimo_requerimiento || record?.stage2?.control?.detalle || record?.stage1?.control?.detalle || "") : ""
+  };
+}
+
+function addCaseHistory(record, event, actor, detail = {}) {
+  record.history = Array.isArray(record.history) ? record.history : [];
+  record.history.push({ at:new Date().toISOString(), event, actor, ...detail });
+  if (record.history.length > 80) record.history = record.history.slice(-80);
+}
+
+function currentControlForRecord(record) {
+  if (record?.proceso === "FORMALIZACION DE CREDITO" && record?.stage2) return record.stage2.control || (record.stage2.control = {});
+  if (record?.stage1) return record.stage1.control || (record.stage1.control = {});
+  return null;
+}
+
+const ADMIN_EXPORT_FIELDS = {
+  updated_at: "Fecha actualización",
+  created_at: "Fecha creación",
+  nombre: "Cliente",
+  dpi: "DPI",
+  nit: "NIT",
+  telefono: "Teléfono",
+  vendedor: "Vendedor",
+  proceso: "Proceso",
+  estado: "Estado",
+  detalle: "Detalle / información requerida",
+  producto: "Producto",
+  producto_sku: "SKU",
+  precio_catalogo: "Precio catálogo interno",
+  monto: "Monto solicitado",
+  ingreso: "Ingreso promedio mensual"
+};
+
+function xmlEscape(v) {
+  return String(v ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;").replace(/'/g,"&apos;");
+}
+
+function makeExcelXml(records, fields) {
+  const cols = fields.filter(f => ADMIN_EXPORT_FIELDS[f]);
+  const cell = (value, type="String") => `<Cell><Data ss:Type="${type}">${xmlEscape(value)}</Data></Cell>`;
+  const rows = [];
+  rows.push(`<Row>${cols.map(f => cell(ADMIN_EXPORT_FIELDS[f])).join("")}</Row>`);
+  for (const rec of records) {
+    const row = caseSummary(rec);
+    rows.push(`<Row>${cols.map(f => {
+      let v = row[f] ?? "";
+      if (["monto","ingreso","precio_catalogo"].includes(f)) return cell(Number(v || 0), "Number");
+      if (["updated_at","created_at"].includes(f) && v) { try { v = new Date(v).toLocaleString("es-GT"); } catch {} }
+      return cell(v);
+    }).join("")}</Row>`);
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="CrediZas"><Table>${rows.join("")}</Table></Worksheet></Workbook>`;
 }
 
 // -----------------------------
@@ -1131,7 +1270,7 @@ const APP_HTML = String.raw`<!doctype html>
 <title>Solicitud fácil de crédito</title>
 <style>
 :root{--bg:#f5f7fb;--card:#fff;--line:#dce3ee;--text:#172033;--muted:#667085;--blue:#14577a;--yellow:#ffc400;--ok:#16a36a;--warn:#e99a18;--bad:#e5483d}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif}header{background:#fff;border-bottom:1px solid var(--line);padding:18px}.header{max-width:1280px;margin:auto;display:flex;justify-content:space-between;gap:16px;align-items:center}.brand{font-size:13px;color:var(--blue);font-weight:900}.brand b{color:#d49f00}h1{font-size:21px;margin:3px 0}.subtitle{color:var(--muted);font-size:12px}main{max-width:1280px;margin:22px auto;padding:0 18px 60px}.screen.hidden,.hidden{display:none!important}.progress{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:18px}.pstep{border:1px solid var(--line);background:#edf1f6;color:#718096;padding:12px;border-radius:12px;font-weight:800;font-size:13px}.pstep.active{background:#e8f5fb;color:var(--blue);border-color:#9bd2e4}.pstep.done{background:#eaf8f1;color:#11734b;border-color:#a9e3c7}.pstep.blocked{background:#fff0ef;color:#b42318;border-color:#f6bbb7}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:18px;box-shadow:0 5px 18px rgba(25,41,70,.04)}.card h2{font-size:18px;margin:0 0 8px}.card h3{font-size:14px;margin:22px 0 10px}.muted{color:var(--muted)}.notice{padding:12px 14px;border-radius:10px;background:#edf7fc;color:#175f7c;font-size:13px;margin:12px 0}.notice.success{background:#eaf8f1;color:#11734b}.notice.warning{background:#fff7e8;color:#945d00}.notice.bad{background:#fff0ef;color:#b42318}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:950px){.grid{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:repeat(2,1fr)}}@media(max-width:650px){.grid,.grid3,.two,.progress{grid-template-columns:1fr}}.section-title{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:9px;margin-bottom:13px}.badge{display:inline-flex;border-radius:999px;padding:4px 8px;background:#e8eef5;color:#526277;font-size:10px;font-weight:800}.badge.ok{background:#dcfce7;color:#166534}.badge.warn{background:#ffedd5;color:#9a3412}.badge.bad{background:#fee2e2;color:#991b1b}.upload-card{border:1px solid var(--line);border-radius:14px;padding:13px;background:#fbfcfe}.upload-title{font-size:12px;font-weight:900;margin-bottom:8px;color:#43506a}.file-input{width:100%;border:1px solid #cbd5e1;border-radius:10px;padding:8px;background:#fff}.file-input::file-selector-button{border:0;border-radius:8px;padding:9px 12px;margin-right:9px;background:var(--blue);color:#fff;font-weight:800;cursor:pointer}.preview{height:230px;border:1px solid #d8e0ea;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-top:10px}.preview img{width:100%;height:100%;object-fit:contain}.preview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:12px}.doc-preview-card{border:1px solid #d8e0ea;border-radius:12px;background:#fff;overflow:hidden}.doc-preview-head{padding:8px 10px;border-bottom:1px solid #e7ecf2;font-size:11px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.doc-preview-body{height:230px;background:#f8fafc;display:flex;align-items:center;justify-content:center;overflow:hidden}.doc-preview-body img{width:100%;height:100%;object-fit:contain}.doc-preview-body iframe{width:100%;height:100%;border:0}.doc-preview-foot{padding:7px 10px;border-top:1px solid #e7ecf2;font-size:10px;color:var(--muted)}.file-meta{font-size:11px;color:var(--muted);margin-top:7px}.field{display:flex;flex-direction:column;gap:5px}.field label{font-size:12px;font-weight:750;color:#43506a}.field input,.field select,.field textarea{width:100%;border:1px solid #cbd5e1;background:#fff;border-radius:9px;padding:10px 11px;font:inherit}.field textarea{min-height:78px;resize:vertical}.field input[readonly]{background:#f3f6f9;color:#475467;font-weight:700}.field-meta{font-size:10px;color:#718096;min-height:13px}.field.ai-found input,.field.ai-found select,.field.ai-found textarea{border-color:#79d8ac;background:#f2fbf6}.field.ai-uncertain input,.field.ai-uncertain select,.field.ai-uncertain textarea{border-color:#f1bd65;background:#fffaf0}.field.ai-conflict input,.field.ai-conflict select,.field.ai-conflict textarea{border-color:#ef8d86;background:#fff5f4}.field.invalid-state input,.field.invalid-state select,.field.invalid-state textarea{border-color:#ef4444!important;background:#fff1f2!important;box-shadow:0 0 0 1px rgba(239,68,68,.08)}.field.valid-state input,.field.valid-state select,.field.valid-state textarea{border-color:#22a06b!important;background:#effaf4!important}.validation-box{border:1px solid #ef4444;background:#fff1f2;color:#991b1b;border-radius:12px;padding:12px 14px;margin-top:16px;font-size:12px}.validation-box.ok{border-color:#22a06b;background:#effaf4;color:#166534}.fixed-rule{border:1px solid #86d3aa;background:#effaf4;color:#166534;border-radius:9px;padding:10px 11px;font-size:12px;font-weight:800;min-height:42px;display:flex;align-items:center}.word-preview{height:100%;width:100%;overflow:hidden;background:#fff;padding:10px;font-size:9px;line-height:1.25;color:#172033}.word-preview h1,.word-preview h2,.word-preview h3{font-size:11px;margin:5px 0}.word-preview p{margin:3px 0}.word-preview table{font-size:8px;border-collapse:collapse;width:100%}.word-preview td,.word-preview th{border:1px solid #dde4ec;padding:2px}.word-fallback{text-align:center;padding:20px;color:#14577a}.word-fallback strong{display:block;font-size:16px;margin-bottom:8px}.result-accordion{padding:0!important;overflow:hidden}.result-accordion summary{list-style:none;cursor:pointer;padding:18px 20px;display:flex;gap:10px;align-items:center;justify-content:space-between;font-weight:900}.result-accordion summary::-webkit-details-marker{display:none}.result-accordion .accordion-body{padding:0 20px 20px}.expand-hint{font-size:11px;color:#667085;font-weight:700}.result-accordion[open] .expand-hint::after{content:" · Ocultar"}.result-accordion:not([open]) .expand-hint::after{content:" · Expandir"}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:15px}button{border:0;border-radius:10px;padding:11px 15px;font-weight:800;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.primary{background:var(--blue);color:#fff}.yellow{background:var(--yellow);color:#2f2a00}.secondary{background:#e9eef5;color:#334155}.positive{background:var(--ok);color:#fff}.negative{background:var(--bad);color:#fff}.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}@keyframes spin{to{transform:rotate(360deg)}}pre{white-space:pre-wrap;word-break:break-word;background:#101827;color:#dbe7f3;border-radius:12px;padding:14px;font-size:11px;max-height:440px;overflow:auto}.tablebox{overflow:auto;border:1px solid var(--line);border-radius:10px}.rules{width:100%;border-collapse:collapse;font-size:12px}.rules th,.rules td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left}.rules th{background:#f8fafc}.step-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.summary-chip{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fafcff;font-size:12px}.reference-list{display:grid;gap:14px}.reference-card{border:1px solid #cfd9e6;border-radius:14px;background:#fbfcfe;padding:15px}.reference-card-title{font-size:14px;font-weight:900;color:var(--blue);padding-bottom:8px;margin-bottom:12px;border-bottom:1px solid #dfe6ef}.reference-card .grid{grid-template-columns:repeat(5,minmax(0,1fr))}.product-search-wrap{position:relative}.product-results{position:absolute;z-index:40;left:0;right:0;top:100%;max-height:340px;overflow:auto;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 12px 28px rgba(15,23,42,.16);margin-top:4px}.product-option{display:grid;grid-template-columns:54px 1fr auto;gap:10px;align-items:center;padding:9px;border-bottom:1px solid #edf1f5;cursor:pointer}.product-option:hover{background:#f2f8fb}.product-option img{width:54px;height:54px;object-fit:cover;border-radius:8px;background:#eef2f6}.product-option .po-name{font-size:11px;font-weight:800}.product-option .po-meta{font-size:10px;color:#667085}.product-option .po-price{font-weight:900;color:#14577a;font-size:12px}.selected-product{border:1px solid #86d3aa;background:#effaf4;border-radius:10px;padding:10px;margin-top:8px;font-size:11px}.home-actions{display:grid;grid-template-columns:1fr 1fr;gap:16px}.home-panel{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fff}.case-results{display:grid;gap:8px;margin-top:12px}.case-row{border:1px solid var(--line);border-radius:10px;padding:11px;background:#fafcff;display:flex;justify-content:space-between;gap:12px;align-items:center}.case-row strong{display:block}.status-row{display:grid;grid-template-columns:180px 1fr;gap:12px;align-items:end}.state-detail.hidden{display:none!important}.top-nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.draft-banner{border:1px solid #f4c56d;background:#fff8e8;color:#805400;padding:10px 12px;border-radius:10px;margin-top:10px}.catalog-price-note{font-size:10px;color:#667085;margin-top:4px}@media(max-width:700px){.home-actions,.status-row{grid-template-columns:1fr}}@media(max-width:1050px){.reference-card .grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:700px){.step-summary,.reference-card .grid{grid-template-columns:1fr}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif}header{background:#fff;border-bottom:1px solid var(--line);padding:18px}.header{max-width:1280px;margin:auto;display:flex;justify-content:space-between;gap:16px;align-items:center}.brand{font-size:13px;color:var(--blue);font-weight:900}.brand b{color:#d49f00}h1{font-size:21px;margin:3px 0}.subtitle{color:var(--muted);font-size:12px}main{max-width:1280px;margin:22px auto;padding:0 18px 60px}.screen.hidden,.hidden{display:none!important}.progress{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:18px}.pstep{border:1px solid var(--line);background:#edf1f6;color:#718096;padding:12px;border-radius:12px;font-weight:800;font-size:13px}.pstep.active{background:#e8f5fb;color:var(--blue);border-color:#9bd2e4}.pstep.done{background:#eaf8f1;color:#11734b;border-color:#a9e3c7}.pstep.blocked{background:#fff0ef;color:#b42318;border-color:#f6bbb7}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:18px;box-shadow:0 5px 18px rgba(25,41,70,.04)}.card h2{font-size:18px;margin:0 0 8px}.card h3{font-size:14px;margin:22px 0 10px}.muted{color:var(--muted)}.notice{padding:12px 14px;border-radius:10px;background:#edf7fc;color:#175f7c;font-size:13px;margin:12px 0}.notice.success{background:#eaf8f1;color:#11734b}.notice.warning{background:#fff7e8;color:#945d00}.notice.bad{background:#fff0ef;color:#b42318}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:950px){.grid{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:repeat(2,1fr)}}@media(max-width:650px){.grid,.grid3,.two,.progress{grid-template-columns:1fr}}.section-title{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:9px;margin-bottom:13px}.badge{display:inline-flex;border-radius:999px;padding:4px 8px;background:#e8eef5;color:#526277;font-size:10px;font-weight:800}.badge.ok{background:#dcfce7;color:#166534}.badge.warn{background:#ffedd5;color:#9a3412}.badge.bad{background:#fee2e2;color:#991b1b}.upload-card{border:1px solid var(--line);border-radius:14px;padding:13px;background:#fbfcfe}.upload-title{font-size:12px;font-weight:900;margin-bottom:8px;color:#43506a}.file-input{width:100%;border:1px solid #cbd5e1;border-radius:10px;padding:8px;background:#fff}.file-input::file-selector-button{border:0;border-radius:8px;padding:9px 12px;margin-right:9px;background:var(--blue);color:#fff;font-weight:800;cursor:pointer}.preview{height:230px;border:1px solid #d8e0ea;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-top:10px}.preview img{width:100%;height:100%;object-fit:contain}.preview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:12px}.doc-preview-card{border:1px solid #d8e0ea;border-radius:12px;background:#fff;overflow:hidden}.doc-preview-head{padding:8px 10px;border-bottom:1px solid #e7ecf2;font-size:11px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.doc-preview-body{height:230px;background:#f8fafc;display:flex;align-items:center;justify-content:center;overflow:hidden}.doc-preview-body img{width:100%;height:100%;object-fit:contain}.doc-preview-body iframe{width:100%;height:100%;border:0}.doc-preview-foot{padding:7px 10px;border-top:1px solid #e7ecf2;font-size:10px;color:var(--muted)}.file-meta{font-size:11px;color:var(--muted);margin-top:7px}.field{display:flex;flex-direction:column;gap:5px}.field label{font-size:12px;font-weight:750;color:#43506a}.field input,.field select,.field textarea{width:100%;border:1px solid #cbd5e1;background:#fff;border-radius:9px;padding:10px 11px;font:inherit}.field textarea{min-height:78px;resize:vertical}.field input[readonly]{background:#f3f6f9;color:#475467;font-weight:700}.field-meta{font-size:10px;color:#718096;min-height:13px}.field.ai-found input,.field.ai-found select,.field.ai-found textarea{border-color:#79d8ac;background:#f2fbf6}.field.ai-uncertain input,.field.ai-uncertain select,.field.ai-uncertain textarea{border-color:#f1bd65;background:#fffaf0}.field.ai-conflict input,.field.ai-conflict select,.field.ai-conflict textarea{border-color:#ef8d86;background:#fff5f4}.field.invalid-state input,.field.invalid-state select,.field.invalid-state textarea{border-color:#ef4444!important;background:#fff1f2!important;box-shadow:0 0 0 1px rgba(239,68,68,.08)}.field.valid-state input,.field.valid-state select,.field.valid-state textarea{border-color:#22a06b!important;background:#effaf4!important}.validation-box{border:1px solid #ef4444;background:#fff1f2;color:#991b1b;border-radius:12px;padding:12px 14px;margin-top:16px;font-size:12px}.validation-box.ok{border-color:#22a06b;background:#effaf4;color:#166534}.fixed-rule{border:1px solid #86d3aa;background:#effaf4;color:#166534;border-radius:9px;padding:10px 11px;font-size:12px;font-weight:800;min-height:42px;display:flex;align-items:center}.word-preview{height:100%;width:100%;overflow:hidden;background:#fff;padding:10px;font-size:9px;line-height:1.25;color:#172033}.word-preview h1,.word-preview h2,.word-preview h3{font-size:11px;margin:5px 0}.word-preview p{margin:3px 0}.word-preview table{font-size:8px;border-collapse:collapse;width:100%}.word-preview td,.word-preview th{border:1px solid #dde4ec;padding:2px}.word-fallback{text-align:center;padding:20px;color:#14577a}.word-fallback strong{display:block;font-size:16px;margin-bottom:8px}.result-accordion{padding:0!important;overflow:hidden}.result-accordion summary{list-style:none;cursor:pointer;padding:18px 20px;display:flex;gap:10px;align-items:center;justify-content:space-between;font-weight:900}.result-accordion summary::-webkit-details-marker{display:none}.result-accordion .accordion-body{padding:0 20px 20px}.expand-hint{font-size:11px;color:#667085;font-weight:700}.result-accordion[open] .expand-hint::after{content:" · Ocultar"}.result-accordion:not([open]) .expand-hint::after{content:" · Expandir"}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:15px}button{border:0;border-radius:10px;padding:11px 15px;font-weight:800;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.primary{background:var(--blue);color:#fff}.yellow{background:var(--yellow);color:#2f2a00}.secondary{background:#e9eef5;color:#334155}.positive{background:var(--ok);color:#fff}.negative{background:var(--bad);color:#fff}.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}@keyframes spin{to{transform:rotate(360deg)}}pre{white-space:pre-wrap;word-break:break-word;background:#101827;color:#dbe7f3;border-radius:12px;padding:14px;font-size:11px;max-height:440px;overflow:auto}.tablebox{overflow:auto;border:1px solid var(--line);border-radius:10px}.rules{width:100%;border-collapse:collapse;font-size:12px}.rules th,.rules td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left}.rules th{background:#f8fafc}.step-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.summary-chip{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fafcff;font-size:12px}.reference-list{display:grid;gap:14px}.reference-card{border:1px solid #cfd9e6;border-radius:14px;background:#fbfcfe;padding:15px}.reference-card-title{font-size:14px;font-weight:900;color:var(--blue);padding-bottom:8px;margin-bottom:12px;border-bottom:1px solid #dfe6ef}.reference-card .grid{grid-template-columns:repeat(5,minmax(0,1fr))}.product-search-wrap{position:relative}.product-results{position:absolute;z-index:40;left:0;right:0;top:100%;max-height:340px;overflow:auto;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 12px 28px rgba(15,23,42,.16);margin-top:4px}.product-option{display:grid;grid-template-columns:54px 1fr auto;gap:10px;align-items:center;padding:9px;border-bottom:1px solid #edf1f5;cursor:pointer}.product-option:hover{background:#f2f8fb}.product-option img{width:54px;height:54px;object-fit:cover;border-radius:8px;background:#eef2f6}.product-option .po-name{font-size:11px;font-weight:800}.product-option .po-meta{font-size:10px;color:#667085}.product-option .po-price{font-weight:900;color:#14577a;font-size:12px}.selected-product{border:1px solid #86d3aa;background:#effaf4;border-radius:14px;padding:12px;margin-top:10px;font-size:11px}.selected-product-card{display:grid;grid-template-columns:92px 1fr;gap:14px;align-items:center}.selected-product-card img{width:92px;height:92px;object-fit:contain;border-radius:10px;background:#fff;border:1px solid #d8e5dc}.selected-product-card .sp-name{font-size:15px;font-weight:900;color:#153f55;margin-bottom:4px}.selected-product-card .sp-sku{font-size:11px;color:#667085}.selected-product-card .sp-amount{font-size:14px;font-weight:900;color:#11734b;margin-top:7px}.seller-login-grid{display:grid;grid-template-columns:1fr 180px auto;gap:10px;align-items:end}.seller-bar{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.lock-note{border:1px solid #f0c36b;background:#fff8e8;color:#7b5100;border-radius:10px;padding:11px 13px;margin-bottom:12px}.case-row .case-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}@media(max-width:700px){.seller-login-grid{grid-template-columns:1fr}}.home-actions{display:grid;grid-template-columns:1fr 1fr;gap:16px}.home-panel{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fff}.case-results{display:grid;gap:8px;margin-top:12px}.case-row{border:1px solid var(--line);border-radius:10px;padding:11px;background:#fafcff;display:flex;justify-content:space-between;gap:12px;align-items:center}.case-row strong{display:block}.status-row{display:grid;grid-template-columns:180px 1fr;gap:12px;align-items:end}.state-detail.hidden{display:none!important}.top-nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.draft-banner{border:1px solid #f4c56d;background:#fff8e8;color:#805400;padding:10px 12px;border-radius:10px;margin-top:10px}.catalog-price-note{font-size:10px;color:#667085;margin-top:4px}@media(max-width:700px){.home-actions,.status-row{grid-template-columns:1fr}}@media(max-width:1050px){.reference-card .grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:700px){.step-summary,.reference-card .grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -1143,25 +1282,36 @@ const APP_HTML = String.raw`<!doctype html>
 </header>
 <main>
 
-<section id="screenHome" class="screen">
+<section id="screenLogin" class="screen">
   <section class="card">
-    <div class="section-title"><h2>CrediZas · Expedientes</h2><span class="badge">Inicio</span></div>
-    <div class="notice">Crea un expediente nuevo o busca uno existente para corregir o completar información.</div>
+    <div class="section-title"><h2>Ingreso de vendedor</h2><span class="badge">Acceso</span></div>
+    <div class="notice">Selecciona tu nombre e ingresa tu PIN de 4 números. Si eres vendedor nuevo, crea tu acceso una sola vez.</div>
+    <div class="seller-login-grid">
+      <div class="field"><label>Vendedor</label><select id="sellerLoginSelect"><option value="">Cargando vendedores...</option></select></div>
+      <div class="field"><label>PIN de 4 números</label><input id="sellerLoginPin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="••••"></div>
+      <button type="button" class="primary" id="sellerLoginBtn">Ingresar</button>
+    </div>
+    <div id="sellerLoginMsg"></div>
+    <details style="margin-top:18px"><summary style="cursor:pointer;font-weight:900;color:#14577a">Soy vendedor nuevo · Crear acceso</summary>
+      <div class="grid3" style="margin-top:12px">
+        <div class="field"><label>Nombre completo *</label><input id="newSellerName" placeholder="Ej. MARÍA LÓPEZ"></div>
+        <div class="field"><label>Crear PIN *</label><input id="newSellerPin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="4 números"></div>
+        <div class="field"><label>Confirmar PIN *</label><input id="newSellerPin2" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="Repite el PIN"></div>
+      </div>
+      <button type="button" class="yellow" id="registerSellerBtn" style="margin-top:12px">Crear mi acceso</button><div id="registerSellerMsg"></div>
+    </details>
+  </section>
+</section>
+
+<section id="screenHome" class="screen hidden">
+  <section class="card">
+    <div class="seller-bar"><div><div class="section-title" style="border:0;margin:0;padding:0"><h2>Mis solicitudes</h2></div><div class="muted" id="sellerGreeting"></div></div><button type="button" class="secondary" id="sellerLogoutBtn">Cerrar sesión</button></div>
     <div id="draftBanner" class="draft-banner hidden"><strong>Hay un borrador guardado en este equipo.</strong><br><button type="button" id="resumeDraftBtn" class="yellow" style="margin-top:8px">Retomar borrador</button></div>
     <div class="home-actions" style="margin-top:14px">
-      <div class="home-panel">
-        <h3 style="margin-top:0">Nuevo expediente</h3>
-        <div class="field"><label>Vendedor *</label><select id="sellerSelect"><option value="">Cargando vendedores...</option></select><span class="field-meta">Si aún no has cargado vendedores, puedes escribirlo manualmente abajo.</span></div>
-        <div class="field" style="margin-top:9px"><label>Vendedor manual</label><input id="sellerManual" placeholder="Nombre del vendedor"></div>
-        <button type="button" class="primary" id="newCaseBtn" style="margin-top:12px">Crear nuevo expediente</button>
-      </div>
-      <div class="home-panel">
-        <h3 style="margin-top:0">Buscar expediente</h3>
-        <div class="field"><label>Buscar por nombre, DPI, NIT o teléfono</label><input id="caseSearchInput" placeholder="Escribe un dato del cliente"></div>
-        <button type="button" class="secondary" id="caseSearchBtn" style="margin-top:12px">Buscar</button>
-        <div id="caseSearchResults" class="case-results"></div>
-      </div>
+      <div class="home-panel"><h3 style="margin-top:0">Nueva solicitud</h3><p class="muted">Crea una nueva precalificación para un cliente.</p><button type="button" class="primary" id="newCaseBtn">Nueva solicitud</button></div>
+      <div class="home-panel"><h3 style="margin-top:0">Buscar mis solicitudes</h3><div class="field"><label>Nombre, DPI, NIT o teléfono</label><input id="caseSearchInput" placeholder="Buscar cliente"></div><button type="button" class="secondary" id="caseSearchBtn" style="margin-top:12px">Buscar</button></div>
     </div>
+    <div id="caseSearchResults" class="case-results" style="margin-top:16px"></div>
   </section>
 </section>
 
@@ -1193,9 +1343,7 @@ const APP_HTML = String.raw`<!doctype html>
         ${selectField("datos_basicos.genero","Género *",["","MASCULINO","FEMENINO"])}
         ${textField("datos_basicos.producto_interes","Producto de interés","text",'readonly value="CCO ELECTRO"')}
         <div class="field product-search-wrap" data-field="solicitud.producto_solicitado"><label>¿Qué producto quiere el cliente? *</label><input id="productSearch" type="text" autocomplete="off" placeholder="Busca por nombre o SKU"><input type="hidden" name="solicitud.producto_solicitado"><input type="hidden" name="solicitud.producto_id"><input type="hidden" name="solicitud.producto_sku"><input type="hidden" name="solicitud.producto_imagen_url"><div id="productResults" class="product-results hidden"></div><div id="selectedProduct" class="selected-product hidden"></div><span class="field-meta">Catálogo activo de ZasHome.</span></div>
-        ${textField("solicitud.producto_precio_catalogo","Precio catálogo","number",'readonly step="0.01"')}
         ${textField("solicitud.monto_total_solicitado","¿Cuánto desea solicitar el cliente?","number",'readonly step="0.01"')}
-        <div class="field"><label>Cálculo</label><div class="fixed-rule">Precio catálogo + 50%</div><div class="catalog-price-note">El monto solicitado se calcula automáticamente como precio × 1.50.</div></div>
         ${textField("informacion_complementaria.ingreso_promedio_mensual","Ingreso promedio mensual del cliente *","number",'min="0" step="0.01"')}
         ${textField("datos_basicos.dpi_foto","DPI FOTO","text","readonly")}
       </div>
@@ -1216,14 +1364,7 @@ const APP_HTML = String.raw`<!doctype html>
         ${textField("informacion_complementaria.municipio","Municipio del domicilio *")}
         ${selectField("informacion_complementaria.nivel_educacion","Nivel de educación *",["","PRIMARIA","BÁSICOS","DIVERSIFICADO","UNIVERSIDAD","OTRO"])}
       </div>
-
-
-      <h3>Estado y proceso del Paso 1</h3>
-      <div class="status-row">
-        <div class="field"><label>Proceso</label><input name="control_etapa1.proceso" value="PRECALIFICACION" readonly></div>
-        <div class="field"><label>Estado *</label><select name="control_etapa1.estado" id="stage1State"><option>SUBIDA</option><option>EN REVISION</option><option>REQUIERE DATOS</option><option>APROBADA</option><option>RECHAZADA</option></select></div>
-      </div>
-      <div class="field state-detail hidden" id="stage1StateDetail"><label>Detalle del estado *</label><textarea name="control_etapa1.detalle" placeholder="Indica qué dato falta, qué debe corregirse o por qué fue rechazada"></textarea></div>
+      <div id="stage1AdminNotice" class="hidden"></div>
 
       <div id="stage1ValidationBox" class="validation-box">Completa los campos obligatorios marcados en rojo.</div>
       <label style="display:flex;gap:9px;align-items:flex-start;margin-top:18px"><input id="verified" type="checkbox" style="margin-top:4px"><span>Confirmo que revisé los datos del cliente y completé lo que hacía falta.</span></label>
@@ -1231,7 +1372,7 @@ const APP_HTML = String.raw`<!doctype html>
     </form>
   </section>
 
-  <section class="card hidden" id="decisionCard"><div class="section-title"><h2>3. Resultado del paso 1</h2><span class="badge warn" id="decisionBadge">Pendiente</span></div><div id="decisionBody"></div><div class="actions" id="simulationActions"><button type="button" class="positive" id="positiveBtn">Probar respuesta POSITIVA</button><button type="button" class="negative" id="negativeBtn">Probar respuesta NEGATIVA</button></div><div class="actions"><button type="button" class="secondary" id="stage1PdfBtn" disabled>Descargar expediente del Paso 1 (PDF)</button></div></section>
+  <section class="card hidden" id="decisionCard"><div class="section-title"><h2>3. Solicitud enviada</h2><span class="badge ok" id="decisionBadge">Subida</span></div><div id="decisionBody"></div><div class="actions"><button type="button" class="secondary" id="stage1PdfBtn" disabled>Descargar expediente del Paso 1 (PDF)</button><button type="button" class="primary" id="backHomeAfterStage1">Volver a mis solicitudes</button></div></section>
 </section>
 
 <section id="screen2" class="screen hidden">
@@ -1239,7 +1380,7 @@ const APP_HTML = String.raw`<!doctype html>
 
   <section class="card">
     <div class="section-title"><h2>Paso 2 · Documentos y datos restantes</h2><span class="badge ok">Paso 1 aprobado</span></div>
-    <div class="notice success">No volveremos a pedir los datos del Paso 1. Aquí solo debes solicitar al cliente lo que falta para completar el expediente.</div>
+    <div class="notice success">No volveremos a pedir los datos del Paso 1. Aquí solo debes solicitar al cliente lo que falta para completar el expediente.</div><div id="stage2AccessNotice"></div>
     <div class="step-summary" id="stage2Summary"></div><div class="actions"><button type="button" class="secondary" id="stage1PdfBtn2">Descargar PDF del Paso 1</button><button type="button" class="primary" id="finalPdfBtnTop" disabled>Descargar expediente completo (PDF)</button></div><div class="muted" id="finalPdfHint" style="margin-top:8px">El expediente completo se habilita después de enviar correctamente el Paso 2.</div>
   </section>
 
@@ -1335,14 +1476,7 @@ const APP_HTML = String.raw`<!doctype html>
           </div>
         </div>
       </div>
-
-
-      <h3>Estado y proceso del Paso 2</h3>
-      <div class="status-row">
-        <div class="field"><label>Proceso</label><input name="control_etapa2.proceso" value="FORMALIZACION DE CREDITO" readonly></div>
-        <div class="field"><label>Estado *</label><select name="control_etapa2.estado" id="stage2State"><option>SUBIDA</option><option>EN REVISION</option><option>REQUIERE DATOS</option><option>APROBADA</option><option>RECHAZADA</option></select></div>
-      </div>
-      <div class="field state-detail hidden" id="stage2StateDetail"><label>Detalle del estado *</label><textarea name="control_etapa2.detalle" placeholder="Indica qué dato falta, qué debe corregirse o por qué fue rechazado"></textarea></div>
+      <div id="stage2AdminNotice" class="hidden"></div>
 
       <div id="stage2ValidationBox" class="validation-box">Completa los campos obligatorios marcados en rojo.</div>
       <label style="display:flex;gap:9px;align-items:flex-start;margin-top:18px"><input id="stage2Verified" type="checkbox" style="margin-top:4px"><span>Confirmo que revisé los documentos y completé los datos faltantes con el cliente.</span></label>
@@ -1359,7 +1493,7 @@ const APP_HTML = String.raw`<!doctype html>
 <script src="https://cdn.jsdelivr.net/npm/mammoth@1.10.0/mammoth.browser.min.js"></script>
 <script>
 const q=s=>document.querySelector(s);
-let extracted=null,sentPayload=null,requestId=null,stage2Extraction=null,stage1Decision=null,finalPayloadCache=null,currentCaseId=null,currentSeller="",stage2AnalyzedSignature="";
+let extracted=null,sentPayload=null,requestId=null,stage2Extraction=null,stage1Decision=null,finalPayloadCache=null,currentCaseId=null,currentSeller="",currentSellerId="",sellerSession=null,currentPermissions={},currentRecordState=null,stage2AnalyzedSignature="";
 const preparedUploads={dpiFront:[],dpiBack:[],stage2Selfie:[],stage2Utility:[],stage2Income:[]};
 
 const DRAFT_KEY="credizas_draft_v19";
@@ -1370,17 +1504,18 @@ function validPhone(v){return /^\d{8}$/.test(String(v||""))}
 function setupPhoneInputs(){document.querySelectorAll('input[type="tel"]').forEach(el=>{el.inputMode="numeric";el.maxLength=8;el.pattern="[0-9]{8}";el.addEventListener("input",()=>{el.value=digits8(el.value);saveDraftSoon()})})}
 function stage2Signature(){return [preparedUploads.stage2Selfie,...preparedUploads.stage2Utility,...preparedUploads.stage2Income].map(f=>[f.name,f.size,f.lastModified].join(":" )).join("|")}
 function invalidateStage2Analysis(){stage2AnalyzedSignature="";q("#stage2ExtractMsg").innerHTML=""}
-function selectedSeller(){return q("#sellerSelect")?.value||q("#sellerManual")?.value.trim()||currentSeller||""}
-function showOnly(id){for(const x of ["screenHome","screen1","screen2"])q("#"+x)?.classList.toggle("hidden",x!==id)}
-function goHome(){showOnly("screenHome");q("#pageTitle").textContent="CrediZas · Expedientes";q("#pageSubtitle").textContent="Crea un expediente nuevo o busca uno existente."}
-function toggleStateDetail(which){const s=q("#"+which+"State"),box=q("#"+which+"StateDetail");if(!s||!box)return;const need=["REQUIERE DATOS","RECHAZADA"].includes(s.value);box.classList.toggle("hidden",!need);const ta=box.querySelector("textarea");if(ta)ta.required=need}
+function selectedSeller(){return currentSeller||sellerSession?.name||""}
+function showOnly(id){for(const x of ["screenLogin","screenHome","screen1","screen2"])q("#"+x)?.classList.toggle("hidden",x!==id)}
+function goHome(){if(!sellerSession){showOnly("screenLogin");return}showOnly("screenHome");q("#pageTitle").textContent="CrediZas · Mis solicitudes";q("#pageSubtitle").textContent="Consulta el estado de tus clientes o crea una nueva solicitud.";q("#sellerGreeting").textContent="Vendedor: "+sellerSession.name;loadSellerCases()}
+function sellerStateLabel(v){return v==="REQUIERE DATOS"?"REQUIERE INFORMACIÓN":v==="EN REVISION"?"EN REVISIÓN":v}
+function sellerProcessLabel(v){return v==="FORMALIZACION DE CREDITO"?"Formalización de crédito":"Precalificación"}
 
 function flattenObject(obj,prefix="",out={}){if(obj===null||obj===undefined)return out;for(const [k,v] of Object.entries(obj)){const path=prefix?prefix+"."+k:k;if(Array.isArray(v)){v.forEach((x,i)=>flattenObject(x,path+"."+i,out))}else if(v&&typeof v==="object")flattenObject(v,path,out);else out[path]=v}return out}
 function fillForm(form,data){const flat=flattenObject(data);for(const [name,value] of Object.entries(flat)){const el=form.querySelector('[name="'+CSS.escape(name)+'"]');if(el&&value!==null&&value!==undefined){el.value=String(value);el.dispatchEvent(new Event("change",{bubbles:true}))}}}
 
 let draftTimer=null;
 function saveDraftSoon(){clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,250)}
-function saveDraft(){try{const data={case_id:currentCaseId,seller:currentSeller||selectedSeller(),screen:q("#screen2")&&!q("#screen2").classList.contains("hidden")?"screen2":"screen1",stage1:collect(q("#preForm")),stage2:collect(q("#stage2Form")),sentPayload,requestId,stage1Decision};localStorage.setItem(DRAFT_KEY,JSON.stringify(data));q("#draftBanner")?.classList.remove("hidden")}catch{}}
+function saveDraft(){try{const data={case_id:currentCaseId,seller:currentSeller||selectedSeller(),seller_id:currentSellerId||sellerSession?.id||"",screen:q("#screen2")&&!q("#screen2").classList.contains("hidden")?"screen2":"screen1",stage1:collect(q("#preForm")),stage2:collect(q("#stage2Form")),sentPayload,requestId,stage1Decision};localStorage.setItem(DRAFT_KEY,JSON.stringify(data));q("#draftBanner")?.classList.remove("hidden")}catch{}}
 function clearDraft(clearFiles=true){localStorage.removeItem(DRAFT_KEY);q("#draftBanner")?.classList.add("hidden");if(clearFiles)clearCachedFiles().catch(()=>{})}
 
 function openFileDb(){return new Promise((resolve,reject)=>{const r=indexedDB.open(FILE_DB,1);r.onupgradeneeded=()=>{const db=r.result;if(!db.objectStoreNames.contains("files"))db.createObjectStore("files")};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
@@ -1391,17 +1526,26 @@ async function clearCachedFiles(){try{const db=await openFileDb();await new Prom
 
 async function restorePreparedFiles(){for(const key of Object.keys(preparedUploads)){const fs=await readCachedFiles(key);if(Array.isArray(fs)&&fs.length)preparedUploads[key]=fs}if(preparedUploads.dpiFront[0]){q("#prevDpiFront").innerHTML='<img src="'+objUrl(preparedUploads.dpiFront[0])+'">';q("#metaDpiFront").textContent=preparedUploads.dpiFront[0].name}if(preparedUploads.dpiBack[0]){q("#prevDpiBack").innerHTML='<img src="'+objUrl(preparedUploads.dpiBack[0])+'">';q("#metaDpiBack").textContent=preparedUploads.dpiBack[0].name}if(preparedUploads.stage2Selfie[0]){q("#prevStage2Selfie").innerHTML='<img src="'+objUrl(preparedUploads.stage2Selfie[0])+'">';q("#metaStage2Selfie").textContent=preparedUploads.stage2Selfie[0].name}await renderMulti(q("#previewStage2Utility"),preparedUploads.stage2Utility);await renderMulti(q("#previewStage2Income"),preparedUploads.stage2Income);updateButtons()}
 
-async function resumeDraft(){const raw=localStorage.getItem(DRAFT_KEY);if(!raw)return;try{const d=JSON.parse(raw);currentCaseId=d.case_id||crypto.randomUUID();currentSeller=d.seller||"";if(d.stage1){fillForm(q("#preForm"),d.stage1);syncProductUiFromForm()}if(d.stage2)fillForm(q("#stage2Form"),d.stage2);sentPayload=d.sentPayload||null;requestId=d.requestId||null;stage1Decision=d.stage1Decision||null;await restorePreparedFiles();if(d.screen==="screen2"&&sentPayload){showOnly("screen2");configureStage2();q("#stage2FormCard").classList.remove("hidden")}else{showOnly("screen1");q("#formCard").classList.remove("hidden")}q("#pageTitle").textContent=d.screen==="screen2"?"Solicitud fácil de crédito · Paso 2":"Solicitud fácil de crédito · Paso 1";updateStage1ValidationUI();updateStage2ValidationUI()}catch(e){alert("No se pudo recuperar el borrador: "+e.message)}}
+async function resumeDraft(){const raw=localStorage.getItem(DRAFT_KEY);if(!raw||!sellerSession)return;try{const d=JSON.parse(raw);if(d.seller_id&&d.seller_id!==sellerSession.id){alert("Este borrador pertenece a otro vendedor.");return}currentCaseId=d.case_id||crypto.randomUUID();currentSeller=sellerSession.name;currentSellerId=sellerSession.id;if(d.stage1){fillForm(q("#preForm"),d.stage1);syncProductUiFromForm()}if(d.stage2)fillForm(q("#stage2Form"),d.stage2);sentPayload=d.sentPayload||null;requestId=d.requestId||null;stage1Decision=d.stage1Decision||null;await restorePreparedFiles();currentPermissions=d.screen==="screen2"?{edit_stage2:true}:{edit_stage1:true};if(d.screen==="screen2"&&sentPayload){showOnly("screen2");configureStage2();q("#stage2FormCard").classList.remove("hidden");setStageEditable("stage2",true,"")}else{showOnly("screen1");q("#formCard").classList.remove("hidden");setStageEditable("stage1",true,"")}q("#pageTitle").textContent=d.screen==="screen2"?"Solicitud fácil de crédito · Paso 2":"Solicitud fácil de crédito · Paso 1";updateStage1ValidationUI();updateStage2ValidationUI()}catch(e){alert("No se pudo recuperar el borrador: "+e.message)}}
 
-async function loadVendors(){try{const r=await fetch("/api/vendors"),d=await r.json(),sel=q("#sellerSelect");sel.innerHTML='<option value="">Seleccionar vendedor</option>';for(const v of d.vendors||[]){const name=typeof v==="string"?v:(v.name||v.nombre||"");if(!name)continue;const o=document.createElement("option");o.value=name;o.textContent=name;sel.appendChild(o)}}catch{q("#sellerSelect").innerHTML='<option value="">Sin vendedores configurados</option>'}}
-async function searchCases(){const term=q("#caseSearchInput").value.trim(),seller=selectedSeller();if(!seller){q("#caseSearchResults").innerHTML='<div class="notice warning">Selecciona o escribe tu vendedor antes de buscar.</div>';return}currentSeller=seller;const u=new URL("/api/cases",location.origin);if(term)u.searchParams.set("q",term);if(seller)u.searchParams.set("seller",seller);const r=await fetch(u),d=await r.json(),box=q("#caseSearchResults");if(!r.ok){box.innerHTML='<div class="notice bad">'+esc(d.error||"No se pudo buscar")+'</div>';return}box.innerHTML=(d.cases||[]).length?(d.cases||[]).map(c=>'<div class="case-row"><div><strong>'+esc(c.nombre||"Sin nombre")+'</strong><span class="muted">DPI '+esc(c.dpi||"")+" · "+esc(c.proceso||"")+" · "+esc(c.estado||"")+'</span></div><button type="button" class="secondary" data-open-case="'+esc(c.id)+'">Abrir</button></div>').join(""):'<div class="muted">No se encontraron expedientes.</div>';box.querySelectorAll("[data-open-case]").forEach(b=>b.addEventListener("click",()=>openExistingCase(b.dataset.openCase)))}
-async function openExistingCase(id){const r=await fetch("/api/cases/"+encodeURIComponent(id)+"?seller="+encodeURIComponent(currentSeller||selectedSeller())),d=await r.json();if(!r.ok||!d.case){alert(d.error||"No se pudo abrir");return}const rec=d.case;currentCaseId=rec.id;currentSeller=rec.vendedor||"";sentPayload=rec.stage1?.data||null;requestId=rec.stage1?.request_id||null;stage1Decision=rec.stage1?.decision||null;if(sentPayload){fillForm(q("#preForm"),sentPayload);syncProductUiFromForm()}await restorePreparedFiles();if(rec.stage2?.data){showOnly("screen2");configureStage2();q("#stage2FormCard").classList.remove("hidden");fillForm(q("#stage2Form"),rec.stage2.data)}else{showOnly("screen1");q("#formCard").classList.remove("hidden")}q("#pageTitle").textContent=rec.stage2?"Solicitud fácil de crédito · Paso 2":"Solicitud fácil de crédito · Paso 1";updateStage1ValidationUI();updateStage2ValidationUI();saveDraftSoon()}
+function only4(el){el.value=String(el.value||"").replace(/\D/g,"").slice(0,4)}
+async function loadSellerOptions(){try{const r=await fetch("/api/sellers/public"),d=await r.json(),sel=q("#sellerLoginSelect");sel.innerHTML='<option value="">Seleccionar vendedor</option>';for(const v of d.sellers||[]){const o=document.createElement("option");o.value=v.id;o.textContent=v.name;sel.appendChild(o)}}catch{q("#sellerLoginSelect").innerHTML='<option value="">No se pudo cargar</option>'}}
+async function checkSellerSession(){try{const r=await fetch("/api/seller/me"),d=await r.json();if(r.ok&&d.ok&&d.seller){sellerSession=d.seller;currentSeller=d.seller.name;currentSellerId=d.seller.id;goHome();return true}}catch{}sellerSession=null;currentSeller="";currentSellerId="";showOnly("screenLogin");return false}
+async function sellerLogin(){const seller_id=q("#sellerLoginSelect").value,pin=q("#sellerLoginPin").value;const msg=q("#sellerLoginMsg");if(!seller_id||!/^[0-9]{4}$/.test(pin)){msg.innerHTML='<div class="notice warning">Selecciona vendedor e ingresa un PIN de 4 números.</div>';return}const r=await fetch("/api/seller/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({seller_id,pin})}),d=await r.json();if(!r.ok||!d.ok){msg.innerHTML='<div class="notice bad">'+esc(d.error||"No autorizado")+'</div>';return}sellerSession=d.seller;currentSeller=d.seller.name;currentSellerId=d.seller.id;q("#sellerLoginPin").value="";goHome()}
+async function registerSeller(){const name=q("#newSellerName").value.trim(),pin=q("#newSellerPin").value,pin2=q("#newSellerPin2").value,msg=q("#registerSellerMsg");if(name.length<3){msg.innerHTML='<div class="notice warning">Escribe tu nombre completo.</div>';return}if(!/^[0-9]{4}$/.test(pin)||pin!==pin2){msg.innerHTML='<div class="notice warning">El PIN debe tener exactamente 4 números y coincidir.</div>';return}const r=await fetch("/api/seller/register",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({name,pin})}),d=await r.json();if(!r.ok||!d.ok){msg.innerHTML='<div class="notice bad">'+esc(d.error||"No se pudo crear el vendedor")+'</div>';return}sellerSession=d.seller;currentSeller=d.seller.name;currentSellerId=d.seller.id;await loadSellerOptions();goHome()}
+async function sellerLogout(){await fetch("/api/seller/logout",{method:"POST"});sellerSession=null;currentSeller="";currentSellerId="";currentCaseId=null;showOnly("screenLogin");q("#pageTitle").textContent="CrediZas · Acceso de vendedor";q("#pageSubtitle").textContent="Ingresa con tu nombre y PIN.";await loadSellerOptions()}
+function actionForCase(c){if(c.proceso==="FORMALIZACION DE CREDITO"&&!c.tiene_paso2)return{label:"Completar Paso 2",edit:true};if(c.estado==="REQUIERE DATOS")return{label:"Editar información",edit:true};return{label:"Ver",edit:false}}
+async function loadSellerCases(){if(!sellerSession)return;const term=q("#caseSearchInput")?.value.trim()||"",u=new URL("/api/seller/cases",location.origin);if(term)u.searchParams.set("q",term);const r=await fetch(u),d=await r.json(),box=q("#caseSearchResults");if(r.status===401){await sellerLogout();return}if(!r.ok){box.innerHTML='<div class="notice bad">'+esc(d.error||"No se pudo cargar")+'</div>';return}box.innerHTML=(d.cases||[]).length?(d.cases||[]).map(c=>{const a=actionForCase(c),detail=c.estado==="REQUIERE DATOS"&&c.detalle?'<div class="notice warning" style="margin:7px 0 0"><strong>Información solicitada:</strong> '+esc(c.detalle)+'</div>':'';return '<div class="case-row"><div><strong>'+esc(c.nombre||"Sin nombre")+'</strong><span class="muted">DPI '+esc(c.dpi||"")+' · '+esc(sellerProcessLabel(c.proceso))+' · '+esc(sellerStateLabel(c.estado))+'</span>'+detail+'</div><div class="case-actions"><button type="button" class="'+(a.edit?'yellow':'secondary')+'" data-open-case="'+esc(c.id)+'">'+a.label+'</button></div></div>'}).join(""):'<div class="muted">Todavía no tienes solicitudes.</div>';box.querySelectorAll("[data-open-case]").forEach(b=>b.addEventListener("click",()=>openExistingCase(b.dataset.openCase)))}
+async function searchCases(){return loadSellerCases()}
+function setStageEditable(stage,editable,requirement){const is1=stage==="stage1",form=is1?q("#preForm"):q("#stage2Form"),notice=is1?q("#stage1AdminNotice"):q("#stage2AdminNotice");if(form)form.querySelectorAll("input,select,textarea").forEach(el=>{if(el.type!=="hidden")el.disabled=!editable});if(is1){["dpiFront","dpiBack"].forEach(id=>{if(q("#"+id))q("#"+id).disabled=!editable});if(q("#analyzeBtn"))q("#analyzeBtn").disabled=!editable;if(q("#submitBtn"))q("#submitBtn").classList.toggle("hidden",!editable)}else{["stage2Selfie","stage2Utility","stage2Income"].forEach(id=>{if(q("#"+id))q("#"+id).disabled=!editable});if(q("#stage2AnalyzeBtn"))q("#stage2AnalyzeBtn").disabled=!editable;if(q("#finalSubmitBtn"))q("#finalSubmitBtn").classList.toggle("hidden",!editable)}if(notice){notice.classList.remove("hidden");notice.innerHTML=editable&&requirement?'<div class="notice warning"><strong>El administrador solicita corregir:</strong><br>'+esc(requirement)+'</div>':editable?'<div class="notice success"><strong>Captura habilitada.</strong> Completa y envía esta etapa.</div>':'<div class="lock-note"><strong>Solo lectura.</strong> El expediente está bloqueado para edición. Solo el administrador puede habilitar correcciones con “Requiere información”.</div>'}}
+async function openExistingCase(id){const r=await fetch("/api/seller/cases/"+encodeURIComponent(id)),d=await r.json();if(!r.ok||!d.case){alert(d.error||"No se pudo abrir");return}const rec=d.case;currentRecordState=rec;currentPermissions=d.permissions||{};currentCaseId=rec.id;currentSeller=sellerSession.name;currentSellerId=sellerSession.id;sentPayload=rec.stage1?.data||null;requestId=rec.stage1?.request_id||null;stage1Decision=rec.stage1?.decision||null;if(sentPayload){fillForm(q("#preForm"),sentPayload);syncProductUiFromForm()}if(rec.proceso==="FORMALIZACION DE CREDITO"){showOnly("screen2");configureStage2();q("#stage2FormCard").classList.remove("hidden");if(rec.stage2?.data)fillForm(q("#stage2Form"),rec.stage2.data);setStageEditable("stage2",Boolean(currentPermissions.start_stage2||currentPermissions.edit_stage2),currentPermissions.requirement||"");q("#pageTitle").textContent="Solicitud fácil de crédito · Paso 2";q("#stage2AccessNotice").innerHTML=currentPermissions.requirement?'<div class="notice warning"><strong>Corrección solicitada:</strong> '+esc(currentPermissions.requirement)+'</div>':''}else{showOnly("screen1");q("#formCard").classList.remove("hidden");setStageEditable("stage1",Boolean(currentPermissions.edit_stage1),currentPermissions.requirement||"");q("#pageTitle").textContent="Solicitud fácil de crédito · Paso 1"}updateStage1ValidationUI();updateStage2ValidationUI()}
 
-function syncProductUiFromForm(){const name=q('[name="solicitud.producto_solicitado"]')?.value||"",sku=q('[name="solicitud.producto_sku"]')?.value||"",price=Number(q('[name="solicitud.producto_precio_catalogo"]')?.value||0),amount=Number(q('[name="solicitud.monto_total_solicitado"]')?.value||0);if(!name)return;q("#productSearch").value=name;q("#selectedProduct").classList.remove("hidden");q("#selectedProduct").innerHTML='<strong>Producto seleccionado</strong><br>'+esc(name)+'<br><span class="muted">'+esc(sku)+(price?' · Precio '+catalogMoney(price):'')+(amount?' · Solicitud '+catalogMoney(amount):'')+'</span>'}
+function productCardHtml(name,sku,image,amount){const img=image?'<img src="'+esc(image)+'" alt="Producto">':'<div style="width:92px;height:92px;border:1px solid #d8e5dc;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;color:#98a2b3;font-weight:800">Sin imagen</div>';return '<div class="selected-product-card">'+img+'<div><div class="sp-name">'+esc(name||"")+'</div><div class="sp-sku">SKU: '+esc(sku||"N/D")+'</div><div class="sp-amount">Monto solicitado: '+catalogMoney(amount)+'</div></div></div>'}
+function syncProductUiFromForm(){const name=q('[name="solicitud.producto_solicitado"]')?.value||"",sku=q('[name="solicitud.producto_sku"]')?.value||"",image=q('[name="solicitud.producto_imagen_url"]')?.value||"",amount=Number(q('[name="solicitud.monto_total_solicitado"]')?.value||0);if(!name)return;q("#productSearch").value=name;q("#selectedProduct").classList.remove("hidden");q("#selectedProduct").innerHTML=productCardHtml(name,sku,image,amount)}
 let catalogTimer=null;
 function catalogMoney(v){return "Q "+Number(v||0).toLocaleString("es-GT",{minimumFractionDigits:2,maximumFractionDigits:2})}
-async function searchCatalog(qry){const box=q("#productResults");if(!qry||qry.length<2){box.classList.add("hidden");return}const r=await fetch("/api/catalog?q="+encodeURIComponent(qry)),d=await r.json();if(!r.ok){box.innerHTML='<div class="notice bad">'+esc(d.error||"No se pudo consultar catálogo")+'</div>';box.classList.remove("hidden");return}const items=(d.data||[]).slice(0,20);box.innerHTML=items.length?items.map((p,i)=>'<div class="product-option" data-product-index="'+i+'">'+(p.imagen_principal_url?'<img src="'+esc(p.imagen_principal_url)+'" alt="">':'<div></div>')+'<div><div class="po-name">'+esc(p.nombre)+'</div><div class="po-meta">'+esc(p.sku||"")+" · "+esc(p.categoria||"")+'</div></div><div class="po-price">'+catalogMoney(p.precio)+'</div></div>').join(""):'<div class="notice">No se encontraron productos.</div>';box.classList.remove("hidden");box.querySelectorAll("[data-product-index]").forEach(el=>el.addEventListener("click",()=>selectCatalogProduct(items[Number(el.dataset.productIndex)])))}
-function selectCatalogProduct(p){q('[name="solicitud.producto_solicitado"]').value=p.nombre||p.descripcion||"";q('[name="solicitud.producto_id"]').value=p.producto_id||"";q('[name="solicitud.producto_sku"]').value=p.sku||"";q('[name="solicitud.producto_imagen_url"]').value=p.imagen_principal_url||"";q('[name="solicitud.producto_precio_catalogo"]').value=Number(p.precio||0).toFixed(2);q('[name="solicitud.monto_total_solicitado"]').value=(Number(p.precio||0)*1.5).toFixed(2);q("#productSearch").value=p.nombre||"";q("#selectedProduct").classList.remove("hidden");q("#selectedProduct").innerHTML='<strong>Producto seleccionado</strong><br>'+esc(p.nombre||"")+'<br><span class="muted">'+esc(p.sku||"")+' · Precio '+catalogMoney(p.precio)+' · Solicitud '+catalogMoney(Number(p.precio||0)*1.5)+'</span>';q("#productResults").classList.add("hidden");updateStage1ValidationUI();saveDraftSoon()}
+async function searchCatalog(qry){const box=q("#productResults");if(!qry||qry.length<2){box.classList.add("hidden");return}const r=await fetch("/api/catalog?q="+encodeURIComponent(qry)),d=await r.json();if(!r.ok){box.innerHTML='<div class="notice bad">'+esc(d.error||"No se pudo consultar catálogo")+'</div>';box.classList.remove("hidden");return}const items=(d.data||[]).slice(0,20);box.innerHTML=items.length?items.map((p,i)=>'<div class="product-option" data-product-index="'+i+'">'+(p.imagen_principal_url?'<img src="'+esc(p.imagen_principal_url)+'" alt="">':'<div></div>')+'<div><div class="po-name">'+esc(p.nombre)+'</div><div class="po-meta">'+esc(p.sku||"")+" · "+esc(p.categoria||"")+'</div></div><div></div></div>').join(""):'<div class="notice">No se encontraron productos.</div>';box.classList.remove("hidden");box.querySelectorAll("[data-product-index]").forEach(el=>el.addEventListener("click",()=>selectCatalogProduct(items[Number(el.dataset.productIndex)])))}
+function selectCatalogProduct(p){q('[name="solicitud.producto_solicitado"]').value=p.nombre||p.descripcion||"";q('[name="solicitud.producto_id"]').value=p.producto_id||"";q('[name="solicitud.producto_sku"]').value=p.sku||"";q('[name="solicitud.producto_imagen_url"]').value=p.imagen_principal_url||"";q('[name="solicitud.monto_total_solicitado"]').value=Number(p.monto_solicitado||0).toFixed(2);q("#productSearch").value=p.nombre||"";q("#selectedProduct").classList.remove("hidden");q("#selectedProduct").innerHTML=productCardHtml(p.nombre||"",p.sku||"",p.imagen_principal_url||"",Number(p.monto_solicitado||0));q("#productResults").classList.add("hidden");updateStage1ValidationUI();saveDraftSoon()}
 
 const objectUrls=[];
 function esc(v){return String(v??"").replace(/[&<>"']/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[s]));}
@@ -1428,17 +1572,15 @@ q("#stage2Utility").addEventListener("change",e=>handleMulti(e.target,"stage2Uti
 q("#stage2Income").addEventListener("change",e=>handleMulti(e.target,"stage2Income",q("#metaStage2Income"),q("#previewStage2Income")));
 
 q("#homeBtn")?.addEventListener("click",goHome);
-q("#newCaseBtn")?.addEventListener("click",()=>{const seller=selectedSeller();if(!seller){alert("Selecciona o escribe el vendedor.");return}currentCaseId=crypto.randomUUID();currentSeller=seller;sentPayload=null;requestId=null;stage1Decision=null;stage2Extraction=null;stage2AnalyzedSignature="";showOnly("screen1");q("#pageTitle").textContent="Solicitud fácil de crédito · Paso 1";q("#pageSubtitle").textContent="Sube el DPI, revisa los datos y completa lo que falta.";saveDraftSoon()});
-q("#caseSearchBtn")?.addEventListener("click",searchCases);
-q("#caseSearchInput")?.addEventListener("keydown",e=>{if(e.key==="Enter")searchCases()});
-q("#resumeDraftBtn")?.addEventListener("click",resumeDraft);
-q("#stage1State")?.addEventListener("change",()=>{toggleStateDetail("stage1");saveDraftSoon()});
-q("#stage2State")?.addEventListener("change",()=>{toggleStateDetail("stage2");saveDraftSoon()});
+q("#sellerLoginPin")?.addEventListener("input",e=>only4(e.target));q("#newSellerPin")?.addEventListener("input",e=>only4(e.target));q("#newSellerPin2")?.addEventListener("input",e=>only4(e.target));
+q("#sellerLoginBtn")?.addEventListener("click",sellerLogin);q("#registerSellerBtn")?.addEventListener("click",registerSeller);q("#sellerLogoutBtn")?.addEventListener("click",sellerLogout);
+q("#newCaseBtn")?.addEventListener("click",async()=>{if(!sellerSession)return;await clearCachedFiles();q("#preForm").reset();q("#stage2Form")?.reset();q("#selectedProduct")?.classList.add("hidden");q("#productSearch").value="";for(const k of Object.keys(preparedUploads))preparedUploads[k]=[];currentCaseId=crypto.randomUUID();currentSeller=sellerSession.name;currentSellerId=sellerSession.id;sentPayload=null;requestId=null;stage1Decision=null;stage2Extraction=null;currentRecordState=null;currentPermissions={edit_stage1:true};stage2AnalyzedSignature="";showOnly("screen1");setStageEditable("stage1",true,"");q("#pageTitle").textContent="Solicitud fácil de crédito · Paso 1";q("#pageSubtitle").textContent="Sube el DPI, revisa los datos y completa lo que falta.";saveDraftSoon()});
+q("#caseSearchBtn")?.addEventListener("click",searchCases);q("#caseSearchInput")?.addEventListener("keydown",e=>{if(e.key==="Enter")searchCases()});q("#resumeDraftBtn")?.addEventListener("click",resumeDraft);q("#backHomeAfterStage1")?.addEventListener("click",goHome);
 q("#productSearch")?.addEventListener("input",e=>{clearTimeout(catalogTimer);catalogTimer=setTimeout(()=>searchCatalog(e.target.value.trim()),250)});
 document.addEventListener("click",e=>{if(!e.target.closest(".product-search-wrap"))q("#productResults")?.classList.add("hidden")});
 q("#preForm")?.addEventListener("input",saveDraftSoon);q("#preForm")?.addEventListener("change",saveDraftSoon);q("#stage2Form")?.addEventListener("input",saveDraftSoon);q("#stage2Form")?.addEventListener("change",saveDraftSoon);
 
-function updateButtons(){const ready1=preparedUploads.dpiFront.length===1&&preparedUploads.dpiBack.length===1;q("#analyzeBtn").disabled=!ready1;q("#uploadStatus").className="notice "+(ready1?"success":"warning");q("#uploadStatus").innerHTML=ready1?"<strong>¡Muy bien!</strong> Ya puedes leer los datos del DPI.":"Sube primero las dos fotos del DPI: enfrente y atrás.";if(sentPayload){const pol=stage2Policy(),ready2=preparedUploads.stage2Selfie.length===1&&preparedUploads.stage2Utility.length>=1&&(!pol.required||preparedUploads.stage2Income.length>=1),same=ready2&&stage2AnalyzedSignature&&stage2AnalyzedSignature===stage2Signature();q("#stage2AnalyzeBtn").disabled=!ready2||same;const missing=[];if(!preparedUploads.stage2Selfie.length)missing.push("selfie con DPI");if(!preparedUploads.stage2Utility.length)missing.push("documento de domicilio");if(pol.required&&!preparedUploads.stage2Income.length)missing.push("sustento de ingresos");q("#stage2DocsStatus").className="notice "+(ready2?"success":"warning");q("#stage2DocsStatus").innerHTML=same?"<strong>Documentos ya leídos.</strong> El botón se habilitará de nuevo si cargas o cambias algún archivo.":ready2?"<strong>Documentos completos.</strong> Ya puedes leerlos con IA.":"<strong>Falta:</strong> "+missing.join(" · ");}}
+function updateButtons(){const ready1=preparedUploads.dpiFront.length===1&&preparedUploads.dpiBack.length===1,canEdit1=!currentRecordState||Boolean(currentPermissions.edit_stage1);q("#analyzeBtn").disabled=!ready1||!canEdit1;q("#uploadStatus").className="notice "+(ready1?"success":"warning");q("#uploadStatus").innerHTML=ready1?"<strong>¡Muy bien!</strong> Ya puedes leer los datos del DPI.":"Sube primero las dos fotos del DPI: enfrente y atrás.";if(sentPayload){const pol=stage2Policy(),ready2=preparedUploads.stage2Selfie.length===1&&preparedUploads.stage2Utility.length>=1&&(!pol.required||preparedUploads.stage2Income.length>=1),same=ready2&&stage2AnalyzedSignature&&stage2AnalyzedSignature===stage2Signature(),canEdit2=Boolean(currentPermissions.start_stage2||currentPermissions.edit_stage2);q("#stage2AnalyzeBtn").disabled=!ready2||same||!canEdit2;const missing=[];if(!preparedUploads.stage2Selfie.length)missing.push("selfie con DPI");if(!preparedUploads.stage2Utility.length)missing.push("documento de domicilio");if(pol.required&&!preparedUploads.stage2Income.length)missing.push("sustento de ingresos");q("#stage2DocsStatus").className="notice "+(ready2?"success":"warning");q("#stage2DocsStatus").innerHTML=same?"<strong>Documentos ya leídos.</strong> El botón se habilitará de nuevo si cargas o cambias algún archivo.":ready2?"<strong>Documentos completos.</strong> Ya puedes leerlos con IA.":"<strong>Falta:</strong> "+missing.join(" · ");}}
 const incomeRules={SALARIO:{origins:["SALARIO FORMAL","SALARIO INFORMAL"],subtype:{"SALARIO FORMAL":"CON DESCUENTO IGSS","SALARIO INFORMAL":"SIN DESCUENTO IGSS"}},RENTAS:{origins:["REMESAS","JUBILADO"],subtype:{REMESAS:"REMESAS",JUBILADO:"JUBILADO"}},VENTAS:{origins:["INDEPENDIENTE FORMAL","INDEPENDIENTE INFORMAL"],subtype:{"INDEPENDIENTE FORMAL":"AMBULANTE","INDEPENDIENTE INFORMAL":"OFICIO MENOR"}}};
 function rebuildIncomeOrigin(){const s=q('[name="informacion_complementaria.fuente_ingresos"]'),o=q('[name="informacion_complementaria.origen_ingresos"]'),t=q('[name="informacion_complementaria.subtipo_ingreso"]');o.innerHTML='<option value="">Seleccionar</option>';t.innerHTML='<option value="">Seleccionar origen primero</option>';const r=incomeRules[s.value];r?.origins.forEach(v=>{const x=document.createElement("option");x.value=v;x.textContent=v;o.appendChild(x)})}
 function rebuildIncomeSubtype(){const s=q('[name="informacion_complementaria.fuente_ingresos"]').value,o=q('[name="informacion_complementaria.origen_ingresos"]').value,t=q('[name="informacion_complementaria.subtipo_ingreso"]');t.innerHTML='<option value="">Seleccionar</option>';const v=incomeRules[s]?.subtype?.[o];if(v){const x=document.createElement("option");x.value=v;x.textContent=v;t.appendChild(x);t.value=v}}
@@ -1460,9 +1602,9 @@ function updateStage2ValidationUI(){const missing=[];for(const name of stage2Req
 function stage2Policy(){const s=sentPayload?.informacion_complementaria?.fuente_ingresos,o=sentPayload?.informacion_complementaria?.origen_ingresos;if(s==="SALARIO"&&o==="SALARIO FORMAL")return{required:true,label:"Pide constancia/carta laboral, boleta u otro respaldo."};if(s==="RENTAS"&&o==="JUBILADO")return{required:true,label:"Pide constancia o comprobante de jubilación/pensión."};if(s==="VENTAS"&&o==="INDEPENDIENTE FORMAL")return{required:true,label:"Constancia de ingresos obligatoria."};if(s==="VENTAS"&&o==="INDEPENDIENTE INFORMAL")return{required:false,label:"No presenta sustento de ingresos."};if(s==="SALARIO"&&o==="SALARIO INFORMAL")return{required:false,label:"No requiere constancia de ingresos."};if(s==="RENTAS"&&o==="REMESAS")return{required:false,label:"No requiere constancia de ingresos."};return{required:false,label:"No se requiere sustento."}}
 function stage2Group(){const s=sentPayload?.informacion_complementaria?.fuente_ingresos,o=sentPayload?.informacion_complementaria?.origen_ingresos;return (s==="SALARIO"&&o==="SALARIO FORMAL")||(s==="RENTAS"&&o==="JUBILADO")?"company":"activity";}
 function configureStage2(){const c=sentPayload?.informacion_complementaria||{},p=stage2Policy(),g=stage2Group();q("#stage2Summary").innerHTML='<div class="summary-chip"><strong>Ingresos</strong><br>'+esc(c.fuente_ingresos||"")+" → "+esc(c.origen_ingresos||"")+" → "+esc(c.subtipo_ingreso||"")+'</div><div class="summary-chip"><strong>Ingreso promedio mensual</strong><br>Q '+esc(c.ingreso_promedio_mensual??"")+'</div><div class="summary-chip"><strong>Regla de sustento</strong><br>'+esc(p.label)+'</div>';q("#stage2IncomeTitle").textContent=p.required?"SUSTENTO DE INGRESOS *":"SUSTENTO DE INGRESOS · NO OBLIGATORIO";q("#stage2IncomeHelp").textContent=p.label;q("#companyGroup").classList.toggle("hidden",g!=="company");q("#activityGroup").classList.toggle("hidden",g!=="activity");if(g==="company"){const o=c.origen_ingresos;q("#companyGroupTitle").textContent=o==="JUBILADO"?"Datos de institución / jubilación":"Datos de la empresa";q("#companyGuide").textContent=o==="JUBILADO"?"Pregunta nombre de institución/entidad, dirección, teléfono y tiempo como jubilado.":"Pregunta nombre de empresa, dirección, teléfono y antigüedad laboral."}if(g==="activity"){const d=q('[name="digitacion.direccion_empresa"]'),t=q('[name="digitacion.telefono_empresa"]');if(d&&!d.value)d.placeholder="Si no tiene local, usa el domicilio del cliente";if(t&&!t.value)t.value=sentPayload?.datos_basicos?.numero_celular||""}updateButtons();updateStage2ValidationUI();}
-function buildStage1Payload(){const p=collect(q("#preForm"));p.expediente={id:currentCaseId||crypto.randomUUID(),vendedor:currentSeller||selectedSeller()};currentCaseId=p.expediente.id;currentSeller=p.expediente.vendedor;p.documentos={dpi_foto:preparedUploads.dpiFront[0]?.name||null,dpi_reverso:preparedUploads.dpiBack[0]?.name||null};p.control={revision_humana:q("#verified").checked,dpi_calidad:extracted?.dpi_quality||null,advertencias_ia:extracted?.warnings||[]};return p;}
+function buildStage1Payload(){const p=collect(q("#preForm"));p.expediente={id:currentCaseId||crypto.randomUUID(),vendedor:currentSeller||sellerSession?.name||"",vendedor_id:currentSellerId||sellerSession?.id||""};delete p.control_etapa1;currentCaseId=p.expediente.id;currentSeller=p.expediente.vendedor;p.documentos={dpi_foto:preparedUploads.dpiFront[0]?.name||null,dpi_reverso:preparedUploads.dpiBack[0]?.name||null};p.control={revision_humana:q("#verified").checked,dpi_calidad:extracted?.dpi_quality||null,advertencias_ia:extracted?.warnings||[]};return p;}
 function validateRefs(p){const refs=p.referencias||[];if(refs.length<3)return"Debes completar las 3 referencias.";for(let i=0;i<3;i++){const r=refs[i]||{},n=i+1;if(!r.nombre_completo||!r.parentesco||!r.celular)return"Referencia "+n+": completa nombre, parentesco y celular.";if(!validPhone(r.celular))return"Referencia "+n+": el celular debe tener exactamente 8 dígitos.";const rel=String(r.parentesco).toUpperCase();if(rel.includes("CONYUGE")||rel.includes("CÓNYUGE")||rel.includes("ESPOS"))return"Referencia "+n+": el cónyuge no puede ser referencia.";if(r.mayor_edad_confirmado!=="SI"||r.mismo_domicilio!=="NO"||r.certifica_datos!=="SI"||r.localizable!=="SI")return"Referencia "+n+": no cumple las reglas obligatorias de referencia."}return null;}
-function buildStage2Payload(){const p=collect(q("#stage2Form"));p.expediente={id:currentCaseId,vendedor:currentSeller};p.documentos={selfie_con_dpi:preparedUploads.stage2Selfie[0]?.name||null,domicilio:preparedUploads.stage2Utility.map(f=>f.name),sustento_ingresos:preparedUploads.stage2Income.map(f=>f.name)};p.control={revision_humana:q("#stage2Verified").checked,selfie_check:stage2Extraction?.selfie_check||null,domicile_consistency:stage2Extraction?.domicile_consistency||null,income_consistency:stage2Extraction?.income_consistency||null,advertencias_ia:stage2Extraction?.warnings||[]};return p;}
+function buildStage2Payload(){const p=collect(q("#stage2Form"));p.expediente={id:currentCaseId,vendedor:currentSeller||sellerSession?.name||"",vendedor_id:currentSellerId||sellerSession?.id||""};delete p.control_etapa2;p.documentos={selfie_con_dpi:preparedUploads.stage2Selfie[0]?.name||null,domicilio:preparedUploads.stage2Utility.map(f=>f.name),sustento_ingresos:preparedUploads.stage2Income.map(f=>f.name)};p.control={revision_humana:q("#stage2Verified").checked,selfie_check:stage2Extraction?.selfie_check||null,domicile_consistency:stage2Extraction?.domicile_consistency||null,income_consistency:stage2Extraction?.income_consistency||null,advertencias_ia:stage2Extraction?.warnings||[]};return p;}
 function requirePdfLibraries(){if(!window.jspdf||!window.jspdf.jsPDF)throw new Error("No se pudo cargar el generador PDF. Revisa la conexión a Internet e intenta de nuevo.");if(window.pdfjsLib)window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";}
 function pdfValue(v){if(v===null||v===undefined||v==="")return "No indicado";return String(v);}
 function pdfMoney(v){const n=Number(v);return Number.isFinite(n)?"Q "+n.toLocaleString("es-GT",{minimumFractionDigits:2,maximumFractionDigits:2}):pdfValue(v);}
@@ -1486,30 +1628,43 @@ function stage1PdfStatus(){return stage1Decision?.status?String(stage1Decision.s
 async function persistPdf(kind,doc){if(!currentCaseId)return;try{const blob=doc.output("blob");await fetch("/api/cases/"+encodeURIComponent(currentCaseId)+"/pdf/"+kind,{method:"PUT",headers:{"content-type":"application/pdf"},body:blob})}catch{}}
 async function downloadStage1Pdf(onlyPersist=false){requirePdfLibraries();const p=sentPayload||buildStage1Payload(),b=p.datos_basicos||{},c=p.informacion_complementaria||{},s=p.solicitud||{},doc=new window.jspdf.jsPDF({unit:"mm",format:"a4"}),title="Expediente de precalificación de crédito - Paso 1";let y=pdfHeader(doc,title);y=pdfCompactSection(doc,"PASO 1 - DATOS BÁSICOS",[["Nombres y apellidos",b.nombre_completo],["DPI",b.numero_dpi],["NIT",b.nit],["Fecha de nacimiento",b.fecha_nacimiento],["Celular",b.numero_celular],["Estado civil",b.estado_civil],["Cónyuge",b.nombre_conyuge],["Género",b.genero]],y);y=pdfCompactSection(doc,"SOLICITUD",[["Producto de interés",b.producto_interes],["Producto solicitado",s.producto_solicitado],["Monto total solicitado",pdfMoney(s.monto_total_solicitado)],["Ingreso promedio mensual",pdfMoney(c.ingreso_promedio_mensual)]],y);y=pdfCompactSection(doc,"INFORMACIÓN COMPLEMENTARIA",[["Fuente de ingresos",c.fuente_ingresos],["Origen de ingresos",c.origen_ingresos],["Subtipo de ingreso",c.subtipo_ingreso],["Nacionalidad",c.tipo_nacionalidad],["Tipo de vivienda",c.tipo_vivienda],["Departamento",c.departamento],["Municipio",c.municipio],["Nivel de educación",c.nivel_educacion]],y);y=pdfCompactSection(doc,"RESULTADO / CONTROL",[["Estado",stage1PdfStatus()],["Solicitud",requestId||"No asignada"]],y);await pdfAddDpiPage(doc,title);pdfFooters(doc);await persistPdf("stage1",doc);if(!onlyPersist)doc.save(pdfClientName(b.nombre_completo)+".pdf");}
 function validateStage2ForPdf(){if(!sentPayload)return"Primero completa el Paso 1.";const s2=buildStage2Payload(),g=stage2Group(),d=s2.domicilio||{},dig=s2.digitacion||{};if(!d.direccion_completa)return"Hace falta la dirección completa.";if(g==="company"){for(const k of ["nombre_empresa","direccion_empresa","telefono_empresa","antiguedad"])if(!dig[k])return"Completa todos los datos de empresa/institución."}else{for(const k of ["giro_oficio","direccion_empresa","telefono_empresa","antiguedad"])if(!dig[k])return"Completa todos los datos de la actividad/oficio."}const refErr=validateRefs(s2);if(refErr)return refErr;if(!q("#stage2Verified").checked)return"Marca la confirmación de revisión antes de generar el PDF.";return null;}
-async function downloadFinalPdf(onlyPersist=false){const err=validateStage2ForPdf();if(err){alert(err);return}requirePdfLibraries();const s1=sentPayload,s2=buildStage2Payload(),b=s1.datos_basicos||{},c=s1.informacion_complementaria||{},s=s1.solicitud||{},d=s2.domicilio||{},dig=s2.digitacion||{},doc=new window.jspdf.jsPDF({unit:"mm",format:"a4"}),title="Expediente completo de crédito";let y=pdfHeader(doc,title);y=pdfCompactSection(doc,"PASO 1 - PRECALIFICACIÓN",[["Nombres y apellidos",b.nombre_completo],["DPI",b.numero_dpi],["NIT",b.nit],["Fecha nacimiento",b.fecha_nacimiento],["Celular",b.numero_celular],["Estado civil",b.estado_civil],["Cónyuge",b.nombre_conyuge],["Género",b.genero],["Producto solicitado",s.producto_solicitado],["Monto solicitado",pdfMoney(s.monto_total_solicitado)],["Ingreso promedio",pdfMoney(c.ingreso_promedio_mensual)],["Vivienda",c.tipo_vivienda],["Ingresos",pdfValue(c.fuente_ingresos)+" / "+pdfValue(c.origen_ingresos)+" / "+pdfValue(c.subtipo_ingreso)],["Departamento",c.departamento],["Municipio",c.municipio],["Educación",c.nivel_educacion]],y);y=pdfCompactSection(doc,"PASO 2 - DOMICILIO",[["Dirección completa",d.direccion_completa],["Zona / sector / colonia",d.zona_sector],["Referencia",d.referencia],["Número de contador",d.numero_contador]],y);const workFields=stage2Group()==="company"?[["Empresa / institución",dig.nombre_empresa],["Dirección",dig.direccion_empresa],["Teléfono",dig.telefono_empresa],["Antigüedad",dig.antiguedad],["NIT empresa (opcional)",dig.nit_empresa],["Ingreso documentado",dig.ingreso_documentado?pdfMoney(dig.ingreso_documentado):"No indicado"]]:[["Giro / actividad / oficio",dig.giro_oficio],["Dirección de actividad",dig.direccion_empresa],["Teléfono de actividad",dig.telefono_empresa],["Antigüedad",dig.antiguedad],["Ingreso documentado",dig.ingreso_documentado?pdfMoney(dig.ingreso_documentado):"No indicado"],["Correo electrónico",s2.contacto?.correo_electronico]];y=pdfCompactSection(doc,"PASO 2 - ACTIVIDAD / INGRESOS",workFields,y);const refs=s2.referencias||[];for(let i=0;i<3;i++){const r=refs[i]||{};y=pdfCompactSection(doc,"REFERENCIA "+(i+1),[["Nombre completo",r.nombre_completo],["Parentesco",r.parentesco],["Celular",r.celular],["Mayor de edad","SI"],["Vive con el cliente","NO"],["Confirma domicilio/datos laborales","SI"],["Localizable","SI"]],y)}await pdfAddDpiPage(doc,title);await pdfAddUploadedDocument(doc,preparedUploads.stage2Selfie[0],title,"Selfie del cliente sosteniendo DPI");for(let i=0;i<preparedUploads.stage2Utility.length;i++)await pdfAddUploadedDocument(doc,preparedUploads.stage2Utility[i],title,"Documento de domicilio "+(i+1));for(let i=0;i<preparedUploads.stage2Income.length;i++)await pdfAddUploadedDocument(doc,preparedUploads.stage2Income[i],title,"Sustento de ingresos "+(i+1));pdfFooters(doc);await persistPdf("final",doc);finalPayloadCache={workflow:{initial_validation:{result:"positive",request_id:requestId},reviewed_by_user:true,submitted_at:new Date().toISOString()},stage1:s1,stage2:s2};if(!onlyPersist)doc.save(pdfClientName(b.nombre_completo)+".pdf");}
+async function downloadFinalPdf(onlyPersist=false){const err=validateStage2ForPdf();if(err){alert(err);return}requirePdfLibraries();const s1=sentPayload,s2=buildStage2Payload(),b=s1.datos_basicos||{},c=s1.informacion_complementaria||{},s=s1.solicitud||{},d=s2.domicilio||{},dig=s2.digitacion||{},doc=new window.jspdf.jsPDF({unit:"mm",format:"a4"}),title="Expediente completo de crédito";let y=pdfHeader(doc,title);y=pdfCompactSection(doc,"PASO 1 - PRECALIFICACIÓN",[["Nombres y apellidos",b.nombre_completo],["DPI",b.numero_dpi],["NIT",b.nit],["Fecha nacimiento",b.fecha_nacimiento],["Celular",b.numero_celular],["Estado civil",b.estado_civil],["Cónyuge",b.nombre_conyuge],["Género",b.genero],["Producto solicitado",s.producto_solicitado],["Monto solicitado",pdfMoney(s.monto_total_solicitado)],["Ingreso promedio",pdfMoney(c.ingreso_promedio_mensual)],["Vivienda",c.tipo_vivienda],["Ingresos",pdfValue(c.fuente_ingresos)+" / "+pdfValue(c.origen_ingresos)+" / "+pdfValue(c.subtipo_ingreso)],["Departamento",c.departamento],["Municipio",c.municipio],["Educación",c.nivel_educacion]],y);y=pdfCompactSection(doc,"PASO 2 - DOMICILIO",[["Dirección completa",d.direccion_completa],["Zona / sector / colonia",d.zona_sector],["Referencia",d.referencia],["Número de contador",d.numero_contador]],y);const workFields=stage2Group()==="company"?[["Empresa / institución",dig.nombre_empresa],["Dirección",dig.direccion_empresa],["Teléfono",dig.telefono_empresa],["Antigüedad",dig.antiguedad],["NIT empresa (opcional)",dig.nit_empresa],["Ingreso documentado",dig.ingreso_documentado?pdfMoney(dig.ingreso_documentado):"No indicado"]]:[["Giro / actividad / oficio",dig.giro_oficio],["Dirección de actividad",dig.direccion_empresa],["Teléfono de actividad",dig.telefono_empresa],["Antigüedad",dig.antiguedad],["Ingreso documentado",dig.ingreso_documentado?pdfMoney(dig.ingreso_documentado):"No indicado"],["Correo electrónico",s2.contacto?.correo_electronico]];y=pdfCompactSection(doc,"PASO 2 - ACTIVIDAD / INGRESOS",workFields,y);const refs=s2.referencias||[];for(let i=0;i<3;i++){const r=refs[i]||{};y=pdfCompactSection(doc,"REFERENCIA "+(i+1),[["Nombre completo",r.nombre_completo],["Parentesco",r.parentesco],["Celular",r.celular],["Mayor de edad","SI"],["Vive con el cliente","NO"],["Confirma domicilio/datos laborales","SI"],["Localizable","SI"]],y)}await pdfAddDpiPage(doc,title);await pdfAddUploadedDocument(doc,preparedUploads.stage2Selfie[0],title,"Selfie del cliente sosteniendo DPI");for(let i=0;i<preparedUploads.stage2Utility.length;i++)await pdfAddUploadedDocument(doc,preparedUploads.stage2Utility[i],title,"Documento de domicilio "+(i+1));for(let i=0;i<preparedUploads.stage2Income.length;i++)await pdfAddUploadedDocument(doc,preparedUploads.stage2Income[i],title,"Sustento de ingresos "+(i+1));pdfFooters(doc);await persistPdf("final",doc);finalPayloadCache={workflow:{initial_validation:{result:"approved_by_admin",request_id:requestId},reviewed_by_user:true,submitted_at:new Date().toISOString()},stage1:s1,stage2:s2};if(!onlyPersist)doc.save(pdfClientName(b.nombre_completo)+".pdf");}
 q("#analyzeBtn").addEventListener("click",async()=>{const b=q("#analyzeBtn");b.disabled=true;b.innerHTML='<span class="spinner"></span> Leyendo los datos del DPI...';q("#extractMsg").innerHTML="";try{const fd=new FormData();fd.append("dpi_front",preparedUploads.dpiFront[0],preparedUploads.dpiFront[0].name);fd.append("dpi_back",preparedUploads.dpiBack[0],preparedUploads.dpiBack[0].name);const r=await fetch("/api/stage1/extract",{method:"POST",body:fd}),raw=await r.text();let data;try{data=JSON.parse(raw)}catch{throw new Error("El servidor devolvió una respuesta no válida: "+raw.slice(0,250))}if(!r.ok||!data.ok)throw new Error(data.error||"No se pudieron leer los datos del DPI.");extracted=data.extraction;q("#formCard").classList.remove("hidden");applyExtraction(extracted.fields,q("#preForm"));q('[name="datos_basicos.producto_interes"]').value="CCO ELECTRO";q('[name="datos_basicos.dpi_foto"]').value=preparedUploads.dpiFront[0]?.name||"";q('[name="informacion_complementaria.tipo_nacionalidad"]').value="GUATEMALA";const dq=extracted.dpi_quality,problems=!dq?.anverso_legible||!dq?.reverso_legible||dq?.vigencia==="vencido";q("#qualityBadge").className="badge "+(problems?"warn":"ok");q("#qualityBadge").textContent=problems?"Revisar DPI":"DPI verificado";q("#qualityBox").innerHTML='<div class="notice '+(problems?'warning':'success')+'"><strong>Revisión del DPI</strong><br>Anverso legible: '+(dq?.anverso_legible?'Sí':'No')+' · Reverso legible: '+(dq?.reverso_legible?'Sí':'No')+' · Vigencia: '+esc(dq?.vigencia||'no_determinado')+'</div>';q("#extractMsg").innerHTML='<div class="notice success"><strong>¡Listo!</strong> Revisa los datos y completa lo que falte.</div>';updateStage1ValidationUI();setProgress(2);q("#formCard").scrollIntoView({behavior:"smooth"})}catch(e){q("#extractMsg").innerHTML='<div class="notice bad">'+esc(e.message)+'</div>'}finally{b.textContent="Leer datos del DPI";updateButtons()}});
 q("#showJsonBtn").addEventListener("click",()=>{q("#jsonPreview").textContent=JSON.stringify(buildStage1Payload(),null,2);q("#jsonPreview").classList.toggle("hidden")});
-q("#preForm").addEventListener("submit",async e=>{e.preventDefault();const p=buildStage1Payload(),b=p.datos_basicos||{},c=p.informacion_complementaria||{},s=p.solicitud||{};for(const [k,l] of [["nombre_completo","Nombre completo"],["numero_dpi","Número de DPI"],["fecha_nacimiento","Fecha de nacimiento"],["nit","NIT"],["numero_celular","Celular"],["estado_civil","Estado civil"],["genero","Género"]])if(!b[k]){q("#submitMsg").innerHTML='<div class="notice bad">Hace falta: '+esc(l)+'.</div>';return}if(!validPhone(b.numero_celular)){q("#submitMsg").innerHTML='<div class="notice bad">El celular del cliente debe tener exactamente 8 dígitos.</div>';return}if(b.estado_civil==="CASADO"&&!b.nombre_conyuge){q("#submitMsg").innerHTML='<div class="notice bad">Ingresa el nombre del cónyuge.</div>';return}if(!s.producto_solicitado||!s.producto_sku){q("#submitMsg").innerHTML='<div class="notice bad">Selecciona el producto desde el catálogo ZasHome.</div>';return}if(!(Number(s.monto_total_solicitado)>0)){q("#submitMsg").innerHTML='<div class="notice bad">Ingresa un monto solicitado válido.</div>';return}if(!(Number(c.ingreso_promedio_mensual)>0)){q("#submitMsg").innerHTML='<div class="notice bad">Ingresa el ingreso promedio mensual del cliente.</div>';return}for(const [k,l] of [["fuente_ingresos","Fuente de ingresos"],["origen_ingresos","Origen de ingresos"],["subtipo_ingreso","Subtipo de ingreso"],["tipo_vivienda","Tipo de vivienda"],["departamento","Departamento"],["municipio","Municipio"],["nivel_educacion","Nivel de educación"]])if(!c[k]){q("#submitMsg").innerHTML='<div class="notice bad">Hace falta: '+esc(l)+'.</div>';return}const ctl=p.control_etapa1||{};if(["REQUIERE DATOS","RECHAZADA"].includes(ctl.estado)&&!String(ctl.detalle||"").trim()){q("#submitMsg").innerHTML='<div class="notice bad">Explica qué dato se requiere o por qué fue rechazada.</div>';return}if(!q("#verified").checked){q("#submitMsg").innerHTML='<div class="notice warning">Marca la casilla de confirmación.</div>';return}sentPayload=p;const btn=q("#submitBtn");btn.disabled=true;btn.textContent="Enviando...";try{const r=await fetch("/api/stage1/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(p)}),data=await r.json();if(!r.ok||!data.ok)throw new Error(data.error||"No se pudo enviar el Paso 1.");requestId=data.result.request_id;currentCaseId=data.result.case_id||currentCaseId;stage1Decision={status:data.result.status||"pending",message:data.result.message||""};downloadStage1Pdf(true).catch(()=>{});q("#stage1PdfBtn").disabled=false;q("#stage1PdfBtn2").disabled=false;q("#stage1PdfBtnForm").disabled=false;q("#stage1PdfHint").textContent="PDF del Paso 1 listo para descargar.";clearDraft(false);q("#decisionCard").classList.remove("hidden");q("#decisionBody").innerHTML='<div class="notice"><strong>Paso 1 enviado correctamente.</strong><br>Solicitud: '+esc(requestId||'N/D')+'</div>';q("#simulationActions").classList.toggle("hidden",data.result.mode!=="simulation");setProgress(3);q("#decisionCard").scrollIntoView({behavior:"smooth"})}catch(err){q("#submitMsg").innerHTML='<div class="notice bad">'+esc(err.message)+'</div>'}finally{btn.disabled=false;btn.textContent="Enviar solicitud del paso 1"}});
-async function simulate(result){const r=await fetch("/api/stage1/simulate",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({request_id:requestId,result,case_id:currentCaseId})}),data=await r.json();if(!r.ok||!data.ok)throw new Error(data.error||"No se pudo simular.");stage1Decision=data.response;const pos=result==="positive";q("#simulationActions").classList.add("hidden");q("#decisionBadge").className="badge "+(pos?"ok":"bad");q("#decisionBadge").textContent=pos?"Respuesta positiva":"Respuesta negativa";q("#decisionBody").innerHTML='<div class="notice '+(pos?'success':'bad')+'"><strong>'+esc(data.response.message)+'</strong></div>';if(pos)goScreen2();else setProgress(3,"blocked")}
-q("#positiveBtn").addEventListener("click",()=>simulate("positive").catch(e=>alert(e.message)));q("#negativeBtn").addEventListener("click",()=>simulate("negative").catch(e=>alert(e.message)));
+q("#preForm").addEventListener("submit",async e=>{e.preventDefault();const p=buildStage1Payload(),b=p.datos_basicos||{},c=p.informacion_complementaria||{},s=p.solicitud||{};for(const [k,l] of [["nombre_completo","Nombre completo"],["numero_dpi","Número de DPI"],["fecha_nacimiento","Fecha de nacimiento"],["nit","NIT"],["numero_celular","Celular"],["estado_civil","Estado civil"],["genero","Género"]])if(!b[k]){q("#submitMsg").innerHTML='<div class="notice bad">Hace falta: '+esc(l)+'.</div>';return}if(!validPhone(b.numero_celular)){q("#submitMsg").innerHTML='<div class="notice bad">El celular del cliente debe tener exactamente 8 dígitos.</div>';return}if(b.estado_civil==="CASADO"&&!b.nombre_conyuge){q("#submitMsg").innerHTML='<div class="notice bad">Ingresa el nombre del cónyuge.</div>';return}if(!s.producto_solicitado||!s.producto_sku){q("#submitMsg").innerHTML='<div class="notice bad">Selecciona el producto desde el catálogo ZasHome.</div>';return}if(!(Number(s.monto_total_solicitado)>0)){q("#submitMsg").innerHTML='<div class="notice bad">Ingresa un monto solicitado válido.</div>';return}if(!(Number(c.ingreso_promedio_mensual)>0)){q("#submitMsg").innerHTML='<div class="notice bad">Ingresa el ingreso promedio mensual del cliente.</div>';return}for(const [k,l] of [["fuente_ingresos","Fuente de ingresos"],["origen_ingresos","Origen de ingresos"],["subtipo_ingreso","Subtipo de ingreso"],["tipo_vivienda","Tipo de vivienda"],["departamento","Departamento"],["municipio","Municipio"],["nivel_educacion","Nivel de educación"]])if(!c[k]){q("#submitMsg").innerHTML='<div class="notice bad">Hace falta: '+esc(l)+'.</div>';return}if(!q("#verified").checked){q("#submitMsg").innerHTML='<div class="notice warning">Marca la casilla de confirmación.</div>';return}sentPayload=p;const btn=q("#submitBtn");btn.disabled=true;btn.textContent="Enviando...";try{const r=await fetch("/api/stage1/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(p)}),data=await r.json();if(!r.ok||!data.ok)throw new Error(data.error||"No se pudo enviar el Paso 1.");requestId=data.result.request_id;currentCaseId=data.result.case_id||currentCaseId;stage1Decision={status:data.result.status||"pending",message:data.result.message||""};downloadStage1Pdf(true).catch(()=>{});q("#stage1PdfBtn").disabled=false;q("#stage1PdfBtn2").disabled=false;q("#stage1PdfBtnForm").disabled=false;q("#stage1PdfHint").textContent="PDF del Paso 1 listo para descargar.";clearDraft(false);q("#decisionCard").classList.remove("hidden");q("#decisionBadge").textContent=sellerStateLabel(data.result.estado||"SUBIDA");q("#decisionBody").innerHTML='<div class="notice success"><strong>Paso 1 enviado al administrador.</strong><br>Solicitud: '+esc(requestId||'N/D')+'<br>Estado: '+esc(sellerStateLabel(data.result.estado||"SUBIDA"))+'</div>';setProgress(3);q("#decisionCard").scrollIntoView({behavior:"smooth"})}catch(err){q("#submitMsg").innerHTML='<div class="notice bad">'+esc(err.message)+'</div>'}finally{btn.disabled=false;btn.textContent="Enviar solicitud del paso 1"}});
 q("#stage1PdfBtn").addEventListener("click",()=>downloadStage1Pdf().catch(e=>alert(e.message)));q("#stage1PdfBtn2").addEventListener("click",()=>downloadStage1Pdf().catch(e=>alert(e.message)));q("#stage1PdfBtnForm").addEventListener("click",()=>downloadStage1Pdf().catch(e=>alert(e.message)));q("#finalPdfBtn").addEventListener("click",()=>downloadFinalPdf().catch(e=>alert(e.message)));q("#finalPdfBtnTop").addEventListener("click",()=>downloadFinalPdf().catch(e=>alert(e.message)));
-q("#stage2AnalyzeBtn").addEventListener("click",async()=>{const btn=q("#stage2AnalyzeBtn");btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Leyendo documentos...';q("#stage2ExtractMsg").innerHTML="";try{const fd=new FormData();fd.append("selfie",preparedUploads.stage2Selfie[0],preparedUploads.stage2Selfie[0].name);preparedUploads.stage2Utility.forEach(f=>fd.append("utility_files",f,f.name));preparedUploads.stage2Income.forEach(f=>fd.append("income_files",f,f.name));fd.append("stage1_json",JSON.stringify(sentPayload));const r=await fetch("/api/stage2/extract",{method:"POST",body:fd}),raw=await r.text();let data;try{data=JSON.parse(raw)}catch{throw new Error("Respuesta no válida: "+raw.slice(0,250))}if(!r.ok||!data.ok)throw new Error(data.error||"No se pudieron analizar los documentos.");stage2Extraction=data.extraction;q("#stage2FormCard").classList.remove("hidden");applyExtraction(stage2Extraction.fields,q("#stage2Form"));const g=stage2Group();if(g==="activity"){const d=q('[name="digitacion.direccion_empresa"]'),t=q('[name="digitacion.telefono_empresa"]');if(!d.value)d.value=q('[name="domicilio.direccion_completa"]')?.value||"";if(!t.value)t.value=sentPayload?.datos_basicos?.numero_celular||""}const sc=stage2Extraction.selfie_check,dc=stage2Extraction.domicile_consistency,ic=stage2Extraction.income_consistency;const problem=!sc?.persona_visible||!sc?.dpi_visible_junto_al_rostro||sc?.texto_dpi_comparable==="no_coincide"||dc?.status==="possible_conflict"||ic?.status==="possible_conflict";q("#stage2QualityBadge").className="badge "+(problem?"warn":"ok");q("#stage2QualityBadge").textContent=problem?"Revisar":"Documentos revisados";q("#stage2QualityBox").innerHTML='<div class="notice '+(problem?'warning':'success')+'"><strong>Revisión automática</strong><br>Selfie con DPI: '+(sc?.dpi_visible_junto_al_rostro?'Correcta':'Revisar')+' · Domicilio: '+esc(dc?.status||'insufficient')+' · Ingresos: '+esc(ic?.status||'not_applicable')+'</div>';stage2AnalyzedSignature=stage2Signature();q("#stage2ExtractMsg").innerHTML='<div class="notice success"><strong>Documentos leídos.</strong> Revisa y completa únicamente lo que falte. Si cambias un archivo, podrás analizarlos de nuevo.</div>';updateStage2ValidationUI();q("#stage2FormCard").scrollIntoView({behavior:"smooth"})}catch(e){q("#stage2ExtractMsg").innerHTML='<div class="notice bad">'+esc(e.message)+'</div>'}finally{btn.textContent="Leer documentos y completar datos";updateButtons()}});
+q("#stage2AnalyzeBtn").addEventListener("click",async()=>{const btn=q("#stage2AnalyzeBtn");btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Leyendo documentos...';q("#stage2ExtractMsg").innerHTML="";try{const fd=new FormData();fd.append("selfie",preparedUploads.stage2Selfie[0],preparedUploads.stage2Selfie[0].name);preparedUploads.stage2Utility.forEach(f=>fd.append("utility_files",f,f.name));preparedUploads.stage2Income.forEach(f=>fd.append("income_files",f,f.name));fd.append("stage1_json",JSON.stringify(sentPayload));fd.append("case_id",currentCaseId||"");const r=await fetch("/api/stage2/extract",{method:"POST",body:fd}),raw=await r.text();let data;try{data=JSON.parse(raw)}catch{throw new Error("Respuesta no válida: "+raw.slice(0,250))}if(!r.ok||!data.ok)throw new Error(data.error||"No se pudieron analizar los documentos.");stage2Extraction=data.extraction;q("#stage2FormCard").classList.remove("hidden");applyExtraction(stage2Extraction.fields,q("#stage2Form"));const g=stage2Group();if(g==="activity"){const d=q('[name="digitacion.direccion_empresa"]'),t=q('[name="digitacion.telefono_empresa"]');if(!d.value)d.value=q('[name="domicilio.direccion_completa"]')?.value||"";if(!t.value)t.value=sentPayload?.datos_basicos?.numero_celular||""}const sc=stage2Extraction.selfie_check,dc=stage2Extraction.domicile_consistency,ic=stage2Extraction.income_consistency;const problem=!sc?.persona_visible||!sc?.dpi_visible_junto_al_rostro||sc?.texto_dpi_comparable==="no_coincide"||dc?.status==="possible_conflict"||ic?.status==="possible_conflict";q("#stage2QualityBadge").className="badge "+(problem?"warn":"ok");q("#stage2QualityBadge").textContent=problem?"Revisar":"Documentos revisados";q("#stage2QualityBox").innerHTML='<div class="notice '+(problem?'warning':'success')+'"><strong>Revisión automática</strong><br>Selfie con DPI: '+(sc?.dpi_visible_junto_al_rostro?'Correcta':'Revisar')+' · Domicilio: '+esc(dc?.status||'insufficient')+' · Ingresos: '+esc(ic?.status||'not_applicable')+'</div>';stage2AnalyzedSignature=stage2Signature();q("#stage2ExtractMsg").innerHTML='<div class="notice success"><strong>Documentos leídos.</strong> Revisa y completa únicamente lo que falte. Si cambias un archivo, podrás analizarlos de nuevo.</div>';updateStage2ValidationUI();q("#stage2FormCard").scrollIntoView({behavior:"smooth"})}catch(e){q("#stage2ExtractMsg").innerHTML='<div class="notice bad">'+esc(e.message)+'</div>'}finally{btn.textContent="Leer documentos y completar datos";updateButtons()}});
 q("#stage2JsonBtn").addEventListener("click",()=>{const final={stage1:sentPayload,stage2:buildStage2Payload()};q("#stage2JsonPreview").textContent=JSON.stringify(final,null,2);q("#stage2JsonPreview").classList.toggle("hidden")});
-q("#stage2Form").addEventListener("submit",async e=>{e.preventDefault();const s2=buildStage2Payload(),g=stage2Group(),d=s2.domicilio||{},dig=s2.digitacion||{};if(!d.direccion_completa){q("#finalMsg").innerHTML='<div class="notice bad">Hace falta la dirección completa.</div>';return}if(g==="company"){for(const [k,l] of [["nombre_empresa","nombre de empresa/institución"],["direccion_empresa","dirección"],["telefono_empresa","teléfono"],["antiguedad","antigüedad"]])if(!dig[k]){q("#finalMsg").innerHTML='<div class="notice bad">Hace falta '+l+'.</div>';return}}else{for(const [k,l] of [["giro_oficio","giro/actividad/oficio"],["direccion_empresa","dirección de actividad"],["telefono_empresa","teléfono"],["antiguedad","antigüedad"]])if(!dig[k]){q("#finalMsg").innerHTML='<div class="notice bad">Hace falta '+l+'.</div>';return}}if(s2.digitacion?.telefono_empresa&&!validPhone(s2.digitacion.telefono_empresa)){q("#finalMsg").innerHTML='<div class="notice bad">El teléfono de empresa/actividad debe tener exactamente 8 dígitos.</div>';return}const refErr=validateRefs(s2);if(refErr){q("#finalMsg").innerHTML='<div class="notice bad">'+esc(refErr)+'</div>';return}const ctl2=s2.control_etapa2||{};if(["REQUIERE DATOS","RECHAZADA"].includes(ctl2.estado)&&!String(ctl2.detalle||"").trim()){q("#finalMsg").innerHTML='<div class="notice bad">Explica qué dato se requiere o por qué fue rechazado.</div>';return}if(!q("#stage2Verified").checked){q("#finalMsg").innerHTML='<div class="notice warning">Marca la confirmación antes de enviar.</div>';return}const finalPayload={workflow:{initial_validation:{result:"positive",request_id:requestId},reviewed_by_user:true,submitted_at:new Date().toISOString()},stage1:sentPayload,stage2:s2};finalPayloadCache=finalPayload;const btn=q("#finalSubmitBtn");btn.disabled=true;btn.textContent="Enviando expediente...";try{const r=await fetch("/api/final/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(finalPayload)}),data=await r.json();if(!r.ok||!data.ok)throw new Error(data.error||"No se pudo enviar el expediente.");q("#finalResultCard").classList.remove("hidden");q("#finalResultCard").open=false;q("#finalResultBody").innerHTML='<div class="notice success"><strong>Expediente completo enviado.</strong><br>'+(s2.control_etapa2?.estado==="APROBADA"?"Aprobado: ya procede cargar la orden a CRM ZasHome.":"Ya puedes descargar el PDF completo.")+'</div><pre>'+esc(JSON.stringify(data.result,null,2))+'</pre>';q("#finalPdfBtn").disabled=false;q("#finalPdfBtnTop").disabled=false;q("#finalPdfHint").textContent="Expediente completo listo para descargar.";clearDraft();downloadFinalPdf(true).catch(()=>{})}catch(err){q("#finalMsg").innerHTML='<div class="notice bad">'+esc(err.message)+'</div>'}finally{btn.disabled=false;btn.textContent="Enviar expediente completo"}});
+q("#stage2Form").addEventListener("submit",async e=>{e.preventDefault();const s2=buildStage2Payload(),g=stage2Group(),d=s2.domicilio||{},dig=s2.digitacion||{};if(!d.direccion_completa){q("#finalMsg").innerHTML='<div class="notice bad">Hace falta la dirección completa.</div>';return}if(g==="company"){for(const [k,l] of [["nombre_empresa","nombre de empresa/institución"],["direccion_empresa","dirección"],["telefono_empresa","teléfono"],["antiguedad","antigüedad"]])if(!dig[k]){q("#finalMsg").innerHTML='<div class="notice bad">Hace falta '+l+'.</div>';return}}else{for(const [k,l] of [["giro_oficio","giro/actividad/oficio"],["direccion_empresa","dirección de actividad"],["telefono_empresa","teléfono"],["antiguedad","antigüedad"]])if(!dig[k]){q("#finalMsg").innerHTML='<div class="notice bad">Hace falta '+l+'.</div>';return}}if(s2.digitacion?.telefono_empresa&&!validPhone(s2.digitacion.telefono_empresa)){q("#finalMsg").innerHTML='<div class="notice bad">El teléfono de empresa/actividad debe tener exactamente 8 dígitos.</div>';return}const refErr=validateRefs(s2);if(refErr){q("#finalMsg").innerHTML='<div class="notice bad">'+esc(refErr)+'</div>';return}if(!q("#stage2Verified").checked){q("#finalMsg").innerHTML='<div class="notice warning">Marca la confirmación antes de enviar.</div>';return}const finalPayload={workflow:{initial_validation:{result:"approved_by_admin",request_id:requestId},reviewed_by_user:true,submitted_at:new Date().toISOString()},stage1:sentPayload,stage2:s2};finalPayloadCache=finalPayload;const btn=q("#finalSubmitBtn");btn.disabled=true;btn.textContent="Enviando expediente...";try{const r=await fetch("/api/final/submit",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(finalPayload)}),data=await r.json();if(!r.ok||!data.ok)throw new Error(data.error||"No se pudo enviar el expediente.");q("#finalResultCard").classList.remove("hidden");q("#finalResultCard").open=false;q("#finalResultBody").innerHTML='<div class="notice success"><strong>Expediente completo enviado.</strong><br>El expediente fue enviado al administrador para revisión.</div><pre>'+esc(JSON.stringify(data.result,null,2))+'</pre>';q("#finalPdfBtn").disabled=false;q("#finalPdfBtnTop").disabled=false;q("#finalPdfHint").textContent="Expediente completo listo para descargar.";clearDraft();downloadFinalPdf(true).catch(()=>{})}catch(err){q("#finalMsg").innerHTML='<div class="notice bad">'+esc(err.message)+'</div>'}finally{btn.disabled=false;btn.textContent="Enviar expediente completo"}});
 q("#resetBtn").addEventListener("click",()=>location.reload());updateButtons();updateStage1ValidationUI();
 
 setupPhoneInputs();
-loadVendors();
-toggleStateDetail("stage1");
-toggleStateDetail("stage2");
+loadSellerOptions();
 if(localStorage.getItem(DRAFT_KEY))q("#draftBanner")?.classList.remove("hidden");
-goHome();
+checkSellerSession();
 </script>
 </body>
 </html>`;
 
 
-const ADMIN_HTML = String.raw`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CrediZas Admin</title><style>body{font-family:Inter,system-ui,Arial;margin:0;background:#f5f7fb;color:#172033}.wrap{max-width:1250px;margin:25px auto;padding:0 18px}.card{background:#fff;border:1px solid #dce3ee;border-radius:14px;padding:18px;margin-bottom:14px}input,select,button,textarea{font:inherit;padding:9px;border:1px solid #cbd5e1;border-radius:8px}button{background:#14577a;color:#fff;border:0;font-weight:800;cursor:pointer}.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.hidden{display:none!important}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #e7ecf2;text-align:left}th{background:#f8fafc}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#e8eef5}.actions{display:flex;gap:6px;flex-wrap:wrap}@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.table{overflow:auto}}</style></head><body><div class="wrap"><h1>CrediZas · Administración</h1><div class="card" id="loginCard"><h3>Ingreso de administrador</h3><input id="adminUser" placeholder="Usuario"><input id="adminPass" type="password" placeholder="Contraseña"><button id="loginBtn">Ingresar</button><div id="loginMsg"></div></div><div id="adminApp" class="hidden"><div class="card"><div class="grid"><input id="fQ" placeholder="Nombre, DPI, NIT o teléfono"><select id="fStatus"><option value="">Todos los estados</option><option>SUBIDA</option><option>EN REVISION</option><option>REQUIERE DATOS</option><option>APROBADA</option><option>RECHAZADA</option></select><select id="fProcess"><option value="">Todos los procesos</option><option value="PRECALIFICACION">PRECALIFICACION</option><option value="FORMALIZACION DE CREDITO">FORMALIZACION DE CREDITO</option></select><select id="fSeller"><option value="">Todos los vendedores</option></select><select id="fSort"><option value="updated_desc">Más recientes</option><option value="date_asc">Más antiguos</option><option value="name_asc">Nombre A-Z</option><option value="nit_asc">NIT</option></select></div><div class="actions" style="margin-top:10px"><button id="searchBtn">Buscar</button><button id="logoutBtn">Cerrar sesión</button></div></div><div class="card table"><table><thead><tr><th>Fecha</th><th>Cliente</th><th>DPI</th><th>NIT</th><th>Teléfono</th><th>Vendedor</th><th>Proceso</th><th>Estado</th><th>PDF</th></tr></thead><tbody id="rows"></tbody></table></div></div></div><script>const q=s=>document.querySelector(s);function esc(v){return String(v??"").replace(/[&<>"']/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[s]))}async function loadV(){const r=await fetch('/api/vendors'),d=await r.json();for(const v of d.vendors||[]){const n=typeof v==='string'?v:(v.name||v.nombre||'');if(n){const o=document.createElement('option');o.value=n;o.textContent=n;q('#fSeller').appendChild(o)}}}async function search(){const u=new URL('/api/admin/cases',location.origin);[['q','#fQ'],['status','#fStatus'],['process','#fProcess'],['seller','#fSeller'],['sort','#fSort']].forEach(([k,s])=>{const v=q(s).value;if(v)u.searchParams.set(k,v)});const r=await fetch(u),d=await r.json();if(r.status===401){q('#loginCard').classList.remove('hidden');q('#adminApp').classList.add('hidden');return}q('#loginCard').classList.add('hidden');q('#adminApp').classList.remove('hidden');q('#rows').innerHTML=(d.cases||[]).map(c=>'<tr><td>'+esc(c.updated_at?new Date(c.updated_at).toLocaleString('es-GT'):'')+'</td><td>'+esc(c.nombre)+'</td><td>'+esc(c.dpi)+'</td><td>'+esc(c.nit)+'</td><td>'+esc(c.telefono)+'</td><td>'+esc(c.vendedor)+'</td><td><span class="pill">'+esc(c.proceso)+'</span></td><td>'+esc(c.estado)+'</td><td><div class="actions">'+(c.pdf_stage1?'<a href="/api/admin/pdf/'+encodeURIComponent(c.id)+'/stage1" target="_blank">Paso 1</a>':'')+(c.pdf_final?'<a href="/api/admin/pdf/'+encodeURIComponent(c.id)+'/final" target="_blank">Final</a>':'')+'</div></td></tr>').join('')}q('#loginBtn').onclick=async()=>{const r=await fetch('/api/admin/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user:q('#adminUser').value,password:q('#adminPass').value})}),d=await r.json();q('#loginMsg').textContent=d.ok?'Ingreso correcto':(d.error||'No autorizado');if(d.ok)search()};q('#searchBtn').onclick=search;q('#logoutBtn').onclick=async()=>{await fetch('/api/admin/logout',{method:'POST'});location.reload()};['#fQ','#fStatus','#fProcess','#fSeller','#fSort'].forEach(s=>q(s).addEventListener('change',search));loadV();search();</script></body></html>`;
+const ADMIN_HTML = String.raw`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CrediZas Admin</title><style>
+body{font-family:Inter,system-ui,Arial;margin:0;background:#f5f7fb;color:#172033}.wrap{max-width:1500px;margin:22px auto;padding:0 18px}.card{background:#fff;border:1px solid #dce3ee;border-radius:14px;padding:18px;margin-bottom:14px}input,select,button{font:inherit;padding:9px;border:1px solid #cbd5e1;border-radius:8px}button{background:#14577a;color:#fff;border:0;font-weight:800;cursor:pointer}.secondary{background:#e9eef5;color:#334155}.yellow{background:#f3c51d;color:#292300}.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.hidden{display:none!important}.table{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;min-width:900px}th,td{padding:8px;border-bottom:1px solid #e7ecf2;text-align:left;vertical-align:top}th{background:#f8fafc;position:sticky;top:0}.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#e8eef5;white-space:nowrap}.actions{display:flex;gap:6px;flex-wrap:wrap}.fields{display:flex;gap:12px;flex-wrap:wrap}.fields label{font-size:12px}.control-cell{min-width:290px}.control-cell select{max-width:155px;padding:6px}.pdfs a{margin-right:7px}.msg{font-size:12px;margin-top:5px}@media(max-width:900px){.grid{grid-template-columns:1fr 1fr}}</style></head><body><div class="wrap"><h1>CrediZas · Administración</h1>
+<div class="card" id="loginCard"><h3>Ingreso de administrador</h3><input id="adminUser" placeholder="Usuario"><input id="adminPass" type="password" placeholder="Contraseña"><button id="loginBtn">Ingresar</button><div id="loginMsg" class="msg"></div></div>
+<div id="adminApp" class="hidden"><div class="card"><div class="grid"><input id="fQ" placeholder="Nombre, DPI, NIT o teléfono"><select id="fStatus"><option value="">Todos los estados</option><option>SUBIDA</option><option>EN REVISION</option><option value="REQUIERE DATOS">REQUIERE INFORMACIÓN</option><option>REINGRESADO</option><option>APROBADA</option><option>RECHAZADA</option></select><select id="fProcess"><option value="">Todos los procesos</option><option value="PRECALIFICACION">PRECALIFICACIÓN</option><option value="FORMALIZACION DE CREDITO">FORMALIZACIÓN DE CRÉDITO</option></select><select id="fSeller"><option value="">Todos los vendedores</option></select><select id="fSort"><option value="updated_desc">Más recientes</option><option value="date_asc">Más antiguos</option><option value="name_asc">Nombre A-Z</option><option value="nit_asc">NIT</option></select></div><div class="actions" style="margin-top:10px"><button id="searchBtn">Buscar</button><button id="exportBtn" class="yellow">Descargar Excel</button><button id="logoutBtn" class="secondary">Cerrar sesión</button></div></div>
+<div class="card"><details><summary style="cursor:pointer;font-weight:800">Seleccionar columnas visibles</summary><div id="fieldChooser" class="fields" style="margin-top:12px"></div></details></div>
+<div class="card table"><table><thead><tr id="headRow"></tr></thead><tbody id="rows"></tbody></table></div></div></div>
+<script>
+const q=s=>document.querySelector(s);const defs={updated_at:"Fecha",nombre:"Cliente",dpi:"DPI",nit:"NIT",telefono:"Teléfono",vendedor:"Vendedor",producto:"Producto",monto:"Monto",ingreso:"Ingreso",proceso:"Proceso",estado:"Estado",detalle:"Detalle"};let dataRows=[];let visible=["updated_at","nombre","dpi","nit","telefono","vendedor","proceso","estado"];
+function esc(v){return String(v??"").replace(/[&<>\"']/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;","'":"&#039;"}[s]))}function money(v){return "Q "+Number(v||0).toLocaleString("es-GT",{minimumFractionDigits:2,maximumFractionDigits:2})}function labelState(v){return v==="REQUIERE DATOS"?"REQUIERE INFORMACIÓN":v==="EN REVISION"?"EN REVISIÓN":v}function labelProcess(v){return v==="FORMALIZACION DE CREDITO"?"Formalización de crédito":"Precalificación"}
+function initFields(){const box=q("#fieldChooser");box.innerHTML=Object.entries(defs).map(([k,l])=>'<label><input type="checkbox" data-field="'+k+'" '+(visible.includes(k)?'checked':'')+'> '+l+'</label>').join("");box.querySelectorAll("input").forEach(x=>x.onchange=()=>{visible=[...box.querySelectorAll("input:checked")].map(i=>i.dataset.field);render()})}
+function display(c,k){if(k==="updated_at")return c[k]?new Date(c[k]).toLocaleString("es-GT"):"";if(k==="monto"||k==="ingreso")return money(c[k]);if(k==="proceso")return labelProcess(c[k]);if(k==="estado")return labelState(c[k]);return c[k]??""}
+function render(){q("#headRow").innerHTML=visible.map(k=>'<th>'+esc(defs[k])+'</th>').join("")+'<th>Control administrativo</th><th>PDF</th>';q("#rows").innerHTML=dataRows.map(c=>'<tr>'+visible.map(k=>'<td>'+esc(display(c,k))+'</td>').join("")+'<td class="control-cell"><div class="actions"><select data-proc="'+esc(c.id)+'"><option value="PRECALIFICACION" '+(c.proceso==="PRECALIFICACION"?'selected':'')+'>Precalificación</option><option value="FORMALIZACION DE CREDITO" '+(c.proceso==="FORMALIZACION DE CREDITO"?'selected':'')+'>Formalización</option></select><select data-state="'+esc(c.id)+'"><option '+(c.estado==="SUBIDA"?'selected':'')+'>SUBIDA</option><option value="EN REVISION" '+(c.estado==="EN REVISION"?'selected':'')+'>EN REVISIÓN</option><option value="REQUIERE DATOS" '+(c.estado==="REQUIERE DATOS"?'selected':'')+'>REQUIERE INFORMACIÓN</option><option '+(c.estado==="REINGRESADO"?'selected':'')+'>REINGRESADO</option><option '+(c.estado==="APROBADA"?'selected':'')+'>APROBADA</option><option '+(c.estado==="RECHAZADA"?'selected':'')+'>RECHAZADA</option></select><button data-save="'+esc(c.id)+'">Guardar</button></div><div class="msg">'+(c.detalle?'<strong>Detalle:</strong> '+esc(c.detalle):'')+'</div></td><td class="pdfs">'+(c.pdf_stage1?'<a href="/api/admin/pdf/'+encodeURIComponent(c.id)+'/stage1" target="_blank">Paso 1</a>':'')+(c.pdf_final?'<a href="/api/admin/pdf/'+encodeURIComponent(c.id)+'/final" target="_blank">Paso 2</a>':'')+'</td></tr>').join("");q("#rows").querySelectorAll("[data-save]").forEach(b=>b.onclick=()=>saveControl(b.dataset.save))}
+async function loadSellers(){const r=await fetch("/api/admin/sellers"),d=await r.json();if(!r.ok)return;for(const v of d.sellers||[]){const o=document.createElement("option");o.value=v.id;o.textContent=v.name;q("#fSeller").appendChild(o)}}
+function queryUrl(path){const u=new URL(path,location.origin);[["q","#fQ"],["status","#fStatus"],["process","#fProcess"],["seller_id","#fSeller"],["sort","#fSort"]].forEach(([k,s])=>{const v=q(s).value;if(v)u.searchParams.set(k,v)});return u}
+async function search(){const r=await fetch(queryUrl("/api/admin/cases")),d=await r.json();if(r.status===401){q("#loginCard").classList.remove("hidden");q("#adminApp").classList.add("hidden");return}q("#loginCard").classList.add("hidden");q("#adminApp").classList.remove("hidden");dataRows=d.cases||[];render()}
+async function saveControl(id){const state=q('[data-state="'+CSS.escape(id)+'"]').value,process=q('[data-proc="'+CSS.escape(id)+'"]').value;let detail="";if(state==="REQUIERE DATOS")detail=prompt("¿Qué información debe corregir o completar el vendedor?",dataRows.find(x=>x.id===id)?.detalle||"")||"";if(state==="RECHAZADA")detail=prompt("¿Por qué no aplica al crédito?",dataRows.find(x=>x.id===id)?.detalle||"")||"";if((state==="REQUIERE DATOS"||state==="RECHAZADA")&&!detail.trim())return;const r=await fetch("/api/admin/cases/"+encodeURIComponent(id)+"/control",{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({estado:state,proceso:process,detalle})}),d=await r.json();if(!r.ok){alert(d.error||"No se pudo actualizar");return}await search()}
+q("#loginBtn").onclick=async()=>{const r=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({user:q("#adminUser").value,password:q("#adminPass").value})}),d=await r.json();q("#loginMsg").textContent=d.ok?"Ingreso correcto":(d.error||"No autorizado");if(d.ok){await loadSellers();search()}};q("#searchBtn").onclick=search;q("#exportBtn").onclick=()=>{const u=queryUrl("/api/admin/export.xls");u.searchParams.set("fields",visible.join(","));location.href=u};q("#logoutBtn").onclick=async()=>{await fetch("/api/admin/logout",{method:"POST"});location.reload()};["#fQ","#fStatus","#fProcess","#fSeller","#fSort"].forEach(s=>q(s).addEventListener("change",search));initFields();search().then(()=>loadSellers());
+</script></body></html>`;
 
 // -----------------------------
 // WORKER ROUTER
@@ -1522,34 +1677,86 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/api/catalog") {
       try {
+        const seller = await verifySeller(request, env);
+        if (!seller && !(await verifyAdmin(request, env))) return json({ ok:false, error:"Inicia sesión." }, 401);
         const data = await fetchCatalogFromZasHome(env, {
           q: url.searchParams.get("q") || "",
           category: url.searchParams.get("category") || "",
           type: url.searchParams.get("type") || ""
         });
-        return json({ ok:true, data:data.slice(0, 50) });
+        return json({ ok:true, data:data.slice(0, 50).map(p=>({producto_id:p.producto_id,sku:p.sku,nombre:p.nombre,descripcion:p.descripcion,categoria:p.categoria,tipo_producto:p.tipo_producto,imagen_principal_url:p.imagen_principal_url,monto_solicitado:requestedAmountFromCatalogPrice(p.precio)})) });
       } catch (e) { return json({ ok:false, error:e?.message || "Error consultando catálogo." }, 502); }
     }
 
-    if (request.method === "GET" && url.pathname === "/api/vendors") {
-      return json({ ok:true, vendors:await getVendors(env), persistence:Boolean(env.CREDIZAS_KV) });
+    if (request.method === "GET" && url.pathname === "/api/sellers/public") {
+      return json({ ok:true, sellers:await listSellers(env) });
     }
 
-    if (request.method === "GET" && url.pathname === "/api/cases") {
-      if (!env.CREDIZAS_KV) return json({ ok:false, error:"Configura el binding CREDIZAS_KV para buscar expedientes." }, 503);
-      const records = await listCaseRecords(env, { q:url.searchParams.get("q")||"", seller:url.searchParams.get("seller")||"", sort:"updated_desc" });
-      return json({ ok:true, cases:records.map(caseSummary) });
+    if (request.method === "POST" && url.pathname === "/api/seller/register") {
+      try {
+        if (!env.CREDIZAS_KV) return json({ok:false,error:"CREDIZAS_KV no está configurado."},503);
+        const body = await request.json();
+        const name = normalizeSellerName(body?.name);
+        const pin = String(body?.pin || "");
+        if (name.length < 3 || name.length > 100) return json({ok:false,error:"Escribe el nombre completo del vendedor."},400);
+        if (!/^\d{4}$/.test(pin)) return json({ok:false,error:"El PIN debe tener exactamente 4 números."},400);
+        const sellers = await listSellers(env);
+        if (sellers.some(x => normalizeSellerName(x.name).toLowerCase() === name.toLowerCase())) return json({ok:false,error:"Ese vendedor ya existe. Selecciónalo para ingresar."},409);
+        const seller = { id:crypto.randomUUID(), name, active:true, created_at:new Date().toISOString() };
+        seller.pin_hash = await sellerPinHash(env, seller.id, pin);
+        await kvPutJson(env, SELLER_PREFIX + seller.id, seller);
+        const token = await createSellerToken(env, seller);
+        const res = json({ok:true,seller:{id:seller.id,name:seller.name}});
+        res.headers.append("set-cookie", `${SELLER_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200`);
+        return res;
+      } catch(e) { return json({ok:false,error:e?.message||"No se pudo crear el vendedor."},400); }
     }
 
-    if (request.method === "GET" && url.pathname.startsWith("/api/cases/")) {
-      const parts = url.pathname.split("/").filter(Boolean);
-      if (parts.length === 3) {
-        const rec = await loadCaseRecord(env, decodeURIComponent(parts[2]));
-        if (!rec) return json({ ok:false, error:"Expediente no encontrado." }, 404);
-        const seller = url.searchParams.get("seller") || "";
-        if (seller && rec.vendedor && seller !== rec.vendedor) return json({ ok:false, error:"Este expediente pertenece a otro vendedor." }, 403);
-        return json({ ok:true, case:rec });
-      }
+    if (request.method === "POST" && url.pathname === "/api/seller/login") {
+      try {
+        const body = await request.json();
+        const sellerId = String(body?.seller_id || "");
+        const pin = String(body?.pin || "");
+        if (!sellerId || !/^\d{4}$/.test(pin)) return json({ok:false,error:"Vendedor o PIN inválido."},400);
+        const seller = await kvGetJson(env, SELLER_PREFIX + sellerId);
+        if (!seller || seller.active === false) return json({ok:false,error:"Vendedor no encontrado."},404);
+        const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+        const failKey = SELLER_FAIL_PREFIX + sellerId + ":" + ip;
+        const fails = Number(await env.CREDIZAS_KV?.get(failKey) || 0);
+        if (fails >= 5) return json({ok:false,error:"Demasiados intentos. Intenta nuevamente en unos minutos."},429);
+        const expected = await sellerPinHash(env, seller.id, pin);
+        if (expected !== seller.pin_hash) {
+          if (env.CREDIZAS_KV) await env.CREDIZAS_KV.put(failKey, String(fails+1), {expirationTtl:600});
+          return json({ok:false,error:"PIN incorrecto."},401);
+        }
+        if (env.CREDIZAS_KV) await env.CREDIZAS_KV.delete(failKey);
+        const token = await createSellerToken(env, seller);
+        const res = json({ok:true,seller:{id:seller.id,name:seller.name}});
+        res.headers.append("set-cookie", `${SELLER_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200`);
+        return res;
+      } catch(e) { return json({ok:false,error:e?.message||"Error de ingreso."},400); }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/seller/me") {
+      const seller = await verifySeller(request, env);
+      return seller ? json({ok:true,seller}) : json({ok:false,error:"Sin sesión."},401);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/seller/logout") {
+      const res=json({ok:true});res.headers.append("set-cookie",`${SELLER_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);return res;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/seller/cases") {
+      const seller = await verifySeller(request, env); if(!seller)return json({ok:false,error:"No autorizado."},401);
+      const records = await listCaseRecords(env,{q:url.searchParams.get("q")||"",sort:"updated_desc"});
+      return json({ok:true,cases:records.filter(r=>sellerOwnsCase(r,seller)).map(r=>caseSummary(r))});
+    }
+
+    if (request.method === "GET" && url.pathname.startsWith("/api/seller/cases/")) {
+      const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"No autorizado."},401);
+      const id=decodeURIComponent(url.pathname.split("/").filter(Boolean)[3]||"");const rec=await loadCaseRecord(env,id);
+      if(!rec)return json({ok:false,error:"Expediente no encontrado."},404);if(!sellerOwnsCase(rec,seller))return json({ok:false,error:"Este expediente pertenece a otro vendedor."},403);
+      return json({ok:true,case:rec,permissions:sellerCasePermissions(rec)});
     }
 
     if (request.method === "POST" && url.pathname === "/api/admin/login") {
@@ -1576,10 +1783,38 @@ export default {
       return json({ ok:true, quota_enabled:r2QuotaEnabled(env), ...usage });
     }
 
+    if (request.method === "GET" && url.pathname === "/api/admin/sellers") {
+      if (!(await verifyAdmin(request, env))) return json({ ok:false, error:"No autorizado." }, 401);
+      return json({ok:true,sellers:await listSellers(env)});
+    }
+
     if (request.method === "GET" && url.pathname === "/api/admin/cases") {
       if (!(await verifyAdmin(request, env))) return json({ ok:false, error:"No autorizado." }, 401);
-      const records = await listCaseRecords(env, { q:url.searchParams.get("q")||"", seller:url.searchParams.get("seller")||"", status:url.searchParams.get("status")||"", process:url.searchParams.get("process")||"", sort:url.searchParams.get("sort")||"updated_desc" });
-      return json({ ok:true, cases:records.map(caseSummary) });
+      const records = await listCaseRecords(env, { q:url.searchParams.get("q")||"", status:url.searchParams.get("status")||"", process:url.searchParams.get("process")||"", sort:url.searchParams.get("sort")||"updated_desc" });
+      const sellerId=url.searchParams.get("seller_id")||"";const filtered=sellerId?records.filter(r=>String(r.vendedor_id||"")===sellerId):records;
+      return json({ ok:true, cases:filtered.map(caseSummary) });
+    }
+
+    if (request.method === "PATCH" && /^\/api\/admin\/cases\/[^/]+\/control$/.test(url.pathname)) {
+      if (!(await verifyAdmin(request, env))) return json({ok:false,error:"No autorizado."},401);
+      const parts=url.pathname.split("/").filter(Boolean),id=decodeURIComponent(parts[3]||"");const rec=await loadCaseRecord(env,id);if(!rec)return json({ok:false,error:"Expediente no encontrado."},404);
+      const body=await request.json(),estado=String(body?.estado||""),proceso=String(body?.proceso||"");let detalle=String(body?.detalle||"").trim();
+      if(!CASE_STATUSES.includes(estado))return json({ok:false,error:"Estado inválido."},400);if(!CASE_PROCESSES.includes(proceso))return json({ok:false,error:"Proceso inválido."},400);
+      if(["REQUIERE DATOS","RECHAZADA"].includes(estado)&&!detalle)return json({ok:false,error:"Este estado requiere un detalle."},400);
+      const prevEstado=rec.estado,prevProceso=rec.proceso;rec.estado=estado;rec.proceso=proceso;
+      if(estado==="REQUIERE DATOS")rec.ultimo_requerimiento=detalle;const ctl=currentControlForRecord(rec);if(ctl){ctl.estado=estado;ctl.proceso=proceso;ctl.detalle=detalle||null}
+      addCaseHistory(rec,"ADMIN_CONTROL","admin",{from_state:prevEstado,to_state:estado,from_process:prevProceso,to_process:proceso,detail:detalle||null});await saveCaseRecord(env,rec);return json({ok:true,case:caseSummary(rec)});
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/admin/export.xls") {
+      if (!(await verifyAdmin(request, env))) return json({ok:false,error:"No autorizado."},401);
+      const records=await listCaseRecords(env,{q:url.searchParams.get("q")||"",status:url.searchParams.get("status")||"",process:url.searchParams.get("process")||"",sort:url.searchParams.get("sort")||"updated_desc"});
+      const sellerId=url.searchParams.get("seller_id")||"",filtered=sellerId?records.filter(r=>String(r.vendedor_id||"")===sellerId):records;const requested=(url.searchParams.get("fields")||"").split(",").filter(Boolean);const fields=requested.length?requested:Object.keys(ADMIN_EXPORT_FIELDS);const xml=makeExcelXml(filtered,fields);
+      return new Response(xml,{headers:{"content-type":"application/vnd.ms-excel; charset=utf-8","content-disposition":`attachment; filename="CrediZas-${new Date().toISOString().slice(0,10)}.xls"`}});
+    }
+
+    if (request.method === "GET" && url.pathname.startsWith("/api/seller/pdf/")) {
+      const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"No autorizado."},401);if(!env.CREDIZAS_FILES)return json({ok:false,error:"R2 no configurado."},503);const parts=url.pathname.split("/").filter(Boolean),id=decodeURIComponent(parts[3]||""),kind=parts[4]==="final"?"final":"stage1",rec=await loadCaseRecord(env,id);if(!rec||!sellerOwnsCase(rec,seller))return json({ok:false,error:"Expediente no autorizado."},403);const quota=await reserveR2Usage(env,{class_b:1});if(!quota.ok)return r2QuotaBlockedResponse(quota);const obj=await env.CREDIZAS_FILES.get(`cases/${id}/${kind}.pdf`);if(!obj)return json({ok:false,error:"PDF no encontrado."},404);const name=String(rec?.stage1?.data?.datos_basicos?.nombre_completo||id).replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _.-]/g," ").replace(/\s+/g," ").trim();return new Response(obj.body,{headers:{"content-type":"application/pdf","content-disposition":`attachment; filename="${name}.pdf"`}});
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/api/admin/pdf/")) {
@@ -1597,12 +1832,15 @@ export default {
     }
 
     if (request.method === "PUT" && url.pathname.startsWith("/api/cases/") && url.pathname.includes("/pdf/")) {
+      const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"No autorizado."},401);
       if (!env.CREDIZAS_FILES) return json({ ok:false, error:"Configura CREDIZAS_FILES para almacenar PDFs." }, 503);
       const parts = url.pathname.split("/").filter(Boolean);
       const id = decodeURIComponent(parts[2]||"");
       const kind = parts[4] === "final" ? "final" : "stage1";
       const pdfBytes = await request.arrayBuffer();
       const rec = await loadCaseRecord(env,id);
+      if(!rec||!sellerOwnsCase(rec,seller))return json({ok:false,error:"Expediente no autorizado."},403);
+      if(!["SUBIDA","REINGRESADO"].includes(rec.estado))return json({ok:false,error:"El PDF está bloqueado porque el expediente ya está en revisión administrativa."},403);
       const oldSize = Number(rec?.pdf_sizes?.[kind] || 0);
       const newSize = pdfBytes.byteLength;
       const storageDelta = Math.max(0, newSize - oldSize);
@@ -1624,7 +1862,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/api/health") {
       return json({
         ok: true,
-        service: "credit-two-screen-worker-v18",
+        service: "credizas-worker-v20-sellers-admin",
         model: env.OPENAI_MODEL || MODEL_DEFAULT,
         openai_key_configured: Boolean(String(env.OPENAI_API_KEY || "").trim()),
         initial_endpoint_configured: Boolean(env.INITIAL_VALIDATION_URL),
@@ -1638,6 +1876,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/stage1/extract") {
       try {
+        const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"Inicia sesión como vendedor."},401);
         const fd = await request.formData();
 
         const dpiFront = fd.get("dpi_front");
@@ -1684,6 +1923,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/stage1/submit") {
       try {
+        const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"Inicia sesión como vendedor."},401);
         const payload = await request.json();
 
         const basic = payload?.datos_basicos || {};
@@ -1770,19 +2010,12 @@ export default {
           payload.informacion_complementaria.origen_ingresos
         );
 
-        const result = await submitInitialValidation(payload, env);
         const caseId = payload?.expediente?.id || crypto.randomUUID();
-        payload.expediente = payload.expediente || {};
-        payload.expediente.id = caseId;
-        const existing = await loadCaseRecord(env, caseId);
-        const control1 = payload.control_etapa1 || { proceso:"PRECALIFICACION", estado:"SUBIDA", detalle:null };
-        const rec = existing || { id:caseId, created_at:new Date().toISOString() };
-        rec.vendedor = payload.expediente.vendedor || rec.vendedor || "";
-        rec.proceso = "PRECALIFICACION";
-        rec.estado = control1.estado || "SUBIDA";
-        rec.stage1 = { data:payload, control:control1, request_id:result.request_id, decision:{ status:result.status, message:result.message || "" }, submitted_at:new Date().toISOString() };
-        await saveCaseRecord(env, rec);
-        return json({ ok: true, result:{ ...result, case_id:caseId, persisted:Boolean(env.CREDIZAS_KV) } });
+        payload.expediente = payload.expediente || {};payload.expediente.id=caseId;payload.expediente.vendedor=seller.name;payload.expediente.vendedor_id=seller.id;
+        const existing=await loadCaseRecord(env,caseId);if(existing&&!sellerOwnsCase(existing,seller))return json({ok:false,error:"Expediente no autorizado."},403);if(existing&&(existing.proceso!=="PRECALIFICACION"||existing.estado!=="REQUIERE DATOS"))return json({ok:false,error:"Este expediente está bloqueado. El administrador debe marcar Requiere información para habilitar correcciones."},403);
+        const result=await submitInitialValidation(payload,env),isCorrection=Boolean(existing),estado=isCorrection?"REINGRESADO":"SUBIDA",control1={proceso:"PRECALIFICACION",estado,detalle:null};payload.control_etapa1=control1;
+        const rec=existing||{id:caseId,created_at:new Date().toISOString()};rec.vendedor=seller.name;rec.vendedor_id=seller.id;rec.proceso="PRECALIFICACION";rec.estado=estado;rec.stage1={data:payload,control:control1,request_id:result.request_id,decision:{status:result.status,message:result.message||""},submitted_at:new Date().toISOString()};addCaseHistory(rec,isCorrection?"STAGE1_REINGRESADO":"STAGE1_SUBIDA","seller",{seller_id:seller.id,seller:seller.name});await saveCaseRecord(env,rec);
+        return json({ok:true,result:{...result,case_id:caseId,estado,persisted:Boolean(env.CREDIZAS_KV)}});
       } catch (e) {
         return json({
           ok: false,
@@ -1793,6 +2026,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/stage1/simulate") {
       try {
+        if(!(await verifyAdmin(request,env)))return json({ok:false,error:"Solo administrador."},401);
         const body = await request.json();
         if (!body?.request_id) return json({ ok: false, error: "Falta request_id." }, 400);
         if (!["positive", "negative"].includes(body.result)) return json({ ok: false, error: "result debe ser positive o negative." }, 400);
@@ -1816,6 +2050,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/stage2/extract") {
       try {
+        const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"Inicia sesión como vendedor."},401);
         const fd = await request.formData();
         const selfieFile = fd.get("selfie");
         const utilityFiles = fd.getAll("utility_files").filter(v => v instanceof File);
@@ -1828,12 +2063,8 @@ export default {
           return json({ ok: false, error: "Sube recibo de luz, agua o constancia municipal." }, 400);
         }
 
-        let stage1Data = {};
-        try {
-          stage1Data = JSON.parse(String(fd.get("stage1_json") || "{}"));
-        } catch {
-          throw new Error("Los datos del Paso 1 no son válidos.");
-        }
+        const caseId=String(fd.get("case_id")||"");const rec=await loadCaseRecord(env,caseId);if(!rec||!sellerOwnsCase(rec,seller))return json({ok:false,error:"Expediente no autorizado."},403);if(rec.proceso!=="FORMALIZACION DE CREDITO")return json({ok:false,error:"El administrador todavía no ha habilitado la Formalización de crédito."},403);if(rec.stage2&&rec.estado!=="REQUIERE DATOS")return json({ok:false,error:"El Paso 2 está bloqueado. El administrador debe marcar Requiere información para corregirlo."},403);
+        const stage1Data = rec.stage1?.data || {};
 
         const source = stage1Data?.informacion_complementaria?.fuente_ingresos;
         const origin = stage1Data?.informacion_complementaria?.origen_ingresos;
@@ -1869,26 +2100,16 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/final/submit") {
       try {
+        const seller=await verifySeller(request,env);if(!seller)return json({ok:false,error:"Inicia sesión como vendedor."},401);
         const payload = await request.json();
-        if (payload?.workflow?.initial_validation?.result !== "positive") return json({ ok: false, error: "La validación inicial no es positiva." }, 400);
         if (!payload?.workflow?.reviewed_by_user) return json({ ok: false, error: "Falta confirmación de revisión humana." }, 400);
+        const caseId=payload?.stage1?.expediente?.id||payload?.stage2?.expediente?.id;const existing=await loadCaseRecord(env,caseId);if(!existing||!sellerOwnsCase(existing,seller))return json({ok:false,error:"Expediente no autorizado."},403);if(existing.proceso!=="FORMALIZACION DE CREDITO")return json({ok:false,error:"El administrador todavía no habilita el Paso 2."},403);if(existing.stage2&&existing.estado!=="REQUIERE DATOS")return json({ok:false,error:"El Paso 2 está bloqueado hasta que el administrador solicite información."},403);
         const phone = payload?.stage2?.digitacion?.telefono_empresa;
         if (phone && !/^\d{8}$/.test(String(phone))) return json({ ok:false, error:"El teléfono de empresa/actividad debe tener exactamente 8 dígitos." }, 400);
         for (const [i, ref] of (payload?.stage2?.referencias || []).entries()) {
           if (!/^\d{8}$/.test(String(ref?.celular || ""))) return json({ ok:false, error:`Referencia ${i+1}: el celular debe tener exactamente 8 dígitos.` }, 400);
         }
-        const result = await submitFinal(payload, env);
-        const caseId = payload?.stage1?.expediente?.id || payload?.stage2?.expediente?.id;
-        if (caseId) {
-          const rec = await loadCaseRecord(env, caseId) || { id:caseId, created_at:new Date().toISOString(), vendedor:payload?.stage1?.expediente?.vendedor || "" };
-          const control2 = payload?.stage2?.control_etapa2 || { proceso:"FORMALIZACION DE CREDITO", estado:"SUBIDA", detalle:null };
-          rec.proceso = "FORMALIZACION DE CREDITO";
-          rec.estado = control2.estado || "SUBIDA";
-          rec.stage2 = { data:payload.stage2, control:control2, submitted_at:new Date().toISOString() };
-          if (!rec.stage1 && payload.stage1) rec.stage1 = { data:payload.stage1 };
-          await saveCaseRecord(env, rec);
-        }
-        return json({ ok: true, result:{ ...result, case_id:caseId, persisted:Boolean(env.CREDIZAS_KV) } });
+        payload.stage2.expediente={id:caseId,vendedor:seller.name,vendedor_id:seller.id};const isCorrection=Boolean(existing.stage2),estado=isCorrection?"REINGRESADO":"SUBIDA",control2={proceso:"FORMALIZACION DE CREDITO",estado,detalle:null};payload.stage2.control_etapa2=control2;const result=await submitFinal(payload,env);existing.proceso="FORMALIZACION DE CREDITO";existing.estado=estado;existing.stage2={data:payload.stage2,control:control2,submitted_at:new Date().toISOString()};addCaseHistory(existing,isCorrection?"STAGE2_REINGRESADO":"STAGE2_SUBIDA","seller",{seller_id:seller.id,seller:seller.name});await saveCaseRecord(env,existing);return json({ok:true,result:{...result,case_id:caseId,estado,persisted:Boolean(env.CREDIZAS_KV)}});
       } catch (e) {
         return json({ ok: false, error: e?.message || "Error en envío final." }, 500);
       }
