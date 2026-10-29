@@ -1,5 +1,11 @@
 {
+  "name": "credizas-worker",
+  "version": "1.0.0",
+  "private": true,
   "scripts": {
     "deploy": "wrangler r2 bucket create datosform-credizas-files || true && wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.155.0"
   }
 }
