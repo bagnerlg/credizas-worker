@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "datosform",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-29",
+  "workers_dev": true,
+
+  // Wrangler auto-provisionará estos recursos la primera vez.
+  // Luego el workflow persistirá automáticamente los IDs/nombres generados.
+  "kv_namespaces": [
+    {
+      "binding": "CREDIZAS_KV"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "CREDIZAS_FILES"
+    }
+  ],
+
+  "vars": {
+    "OPENAI_MODEL": "gpt-5.4-mini",
+    "IMAGE_DETAIL": "high",
+    "PDF_DETAIL": "high",
+    "VENDEDORES_JSON": "[]"
+  }
+}
