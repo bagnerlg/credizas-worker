@@ -1,24 +1,29 @@
-# CrediZas Worker V21.6
+# CrediZas Worker V21.7
 
-Versión de producción para Cloudflare Workers Builds.
+Versión estable basada en V21.6 con validación informativa de cobertura BDA desde el documento `Áreas de Atención y Zonas no Autorizadas 070-3-37.pdf`.
 
-## Cambios V21.6
+## Cobertura
 
-- El administrador ya no puede cambiar manualmente el proceso.
-- Precalificación y Formalización tienen estados independientes.
-- Aprobar Precalificación conserva `APROBADA` y habilita automáticamente Formalización en `REQUIERE DATOS`.
-- La Formalización mantiene su propio estado sin sobrescribir el de Precalificación.
-- El vendedor ve ambos estados en su listado con indicadores grandes y visibles.
-- El administrador ve controles de estado separados para Precalificación y Formalización.
-- El proceso se deriva automáticamente de los estados del expediente.
-- Se mantienen sin cambios `package.json`, `wrangler.jsonc`, KV, R2 y secrets existentes.
+- Usa Departamento y Municipio como ubicación obligatoria.
+- `Nombre de poblado` es opcional.
+- La información de agencias se ignora.
+- La referencia de restricciones usa únicamente la columna BDA; INCOMEL no se utiliza.
+- Si solo se indica departamento/municipio, muestra si el municipio figura en el área de atención.
+- Si se indica poblado, busca su regla BDA exacta y muestra:
+  - verde: habilitado;
+  - naranja: cobertura con condición / horario / bloqueo parcial;
+  - rojo: sin cobertura por ubicación.
+- La alerta de cobertura NO bloquea guardar ni enviar la solicitud.
+- El resultado BDA se guarda dentro del Paso 1 y se imprime en los PDFs.
 
-## Despliegue
+## KV
 
-Cloudflare Builds:
+La base de cobertura se guarda en el mismo binding `CREDIZAS_KV` con la llave:
 
-- Build command: ninguno
-- Deploy command: `npm run deploy`
-- Root directory: `/`
+`config:bda_coverage:070-3-37`
 
-No es necesario cambiar variables, secretos ni bindings existentes.
+La semilla es no destructiva: solo se crea si la llave todavía no existe. No borra ni sobrescribe expedientes existentes.
+
+## Configuración existente
+
+No requiere variables nuevas ni cambios en R2, KV, secrets, `package.json` o `wrangler.jsonc`.
