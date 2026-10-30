@@ -1,4 +1,4 @@
-# CrediZas Worker · V21.3
+# CrediZas Worker · V21.4
 
 Versión correctiva sobre V21.2.
 
@@ -26,3 +26,11 @@ Sustituir los archivos del repositorio y hacer commit a `main`. Cloudflare Build
 - Comando de compilación: ninguno.
 - Implementar comando: `npm run deploy`.
 - Directorio raíz: `/`.
+
+
+## Cambios V21.4
+- DPI frente/reverso se guardan en R2 y se restauran al editar o consultar un expediente.
+- Expedientes antiguos intentan recuperar DPI desde el caché local del mismo navegador; si nunca se almacenó, se solicita volver a subirlo una vez.
+- Botón Cancelar edición en Paso 1 y Paso 2.
+- El vendedor ve el Estado y Proceso como indicadores visibles en su listado.
+- La eliminación administrativa también elimina las fotos DPI guardadas en R2.
