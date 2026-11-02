@@ -1,29 +1,20 @@
-# CrediZas Worker V21.7
+# CrediZas Worker V22.0
 
-Versión estable basada en V21.6 con validación informativa de cobertura BDA desde el documento `Áreas de Atención y Zonas no Autorizadas 070-3-37.pdf`.
+Base: V21.8 estable.
 
-## Cobertura
+## Paso 3
+- Admin aprueba Formalización y se habilita Paso 3.
+- Admin carga opciones de plazo/cuota.
+- Vendedor ratifica con cliente una opción.
+- Admin registra envío por correo y respuesta final del banco: autorización, cupo, enganche, plazo y cuota.
+- Admin carga exactamente dos PDF para firma/huella.
+- Vendedor descarga documentos y registra entrega con foto + geolocalización.
 
-- Usa Departamento y Municipio como ubicación obligatoria.
-- `Nombre de poblado` es opcional.
-- La información de agencias se ignora.
-- La referencia de restricciones usa únicamente la columna BDA; INCOMEL no se utiliza.
-- Si solo se indica departamento/municipio, muestra si el municipio figura en el área de atención.
-- Si se indica poblado, busca su regla BDA exacta y muestra:
-  - verde: habilitado;
-  - naranja: cobertura con condición / horario / bloqueo parcial;
-  - rojo: sin cobertura por ubicación.
-- La alerta de cobertura NO bloquea guardar ni enviar la solicitud.
-- El resultado BDA se guarda dentro del Paso 1 y se imprime en los PDFs.
+## Respuestas a requerimientos
+Cuando Admin usa REQUIERE INFORMACIÓN en Paso 1 o Paso 2, vendedor debe responder qué corrigió/aclaró al reenviar.
 
-## KV
+## Ejemplos configurables
+Admin puede subir ejemplos de selfie con DPI, documento de domicilio, firma/huella y foto de entrega. Se guardan en R2 usando la KV y bindings existentes.
 
-La base de cobertura se guarda en el mismo binding `CREDIZAS_KV` con la llave:
-
-`config:bda_coverage:070-3-37`
-
-La semilla es no destructiva: solo se crea si la llave todavía no existe. No borra ni sobrescribe expedientes existentes.
-
-## Configuración existente
-
-No requiere variables nuevas ni cambios en R2, KV, secrets, `package.json` o `wrangler.jsonc`.
+## Geolocalización
+Manual o GPS del dispositivo. Se incluye opción de fuente ZasHome para futura integración API; no se llama todavía a una API geográfica porque no se ha definido su endpoint/contrato.
