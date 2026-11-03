@@ -1,23 +1,18 @@
-# CrediZas V22.3.2.2
+# CrediZas Worker V22.3.3
 
-Base: ZIP V22.2 proporcionado por el usuario (`credizas-worker-completo-v22.2(1).zip`).
+Corrección de compatibilidad del Paso 3 en administración.
 
-Corrección crítica respecto a V22.3.2:
-- Se restauró/definió `searchCases()` antes de registrar los listeners del buscador del vendedor.
-- Esto evita que el JavaScript se detenga antes de ejecutar `loadSellerOptions()` y corrige la pantalla que quedaba en “Cargando vendedores…”.
+## Corrección principal
+- `adminDocManagerHtml()` ya no puede bloquear el render del Paso 3.
+- Normaliza y filtra documentos heredados/incompletos.
+- Si el administrador de archivos encuentra un error, muestra una advertencia y el Paso 3 continúa cargando.
+- `wireAdminDocDelete()` también queda protegido contra nodos/IDs inválidos.
+- Compatible con expedientes antiguos que todavía conservan `stage3_documents.quote_evidence` de V22.1/V22.2.
 
-Se conservan los cambios funcionales de V22.3.2:
+## Conserva
+- OCR temporal de cuotas sin guardar nuevas fotos en R2.
 - OCR de aprobación final del banco.
-- Imágenes de cuotas temporales: se leen con Tesseract y no se guardan en R2.
-- Administración/eliminación de archivos por el administrador.
-- Reemplazo controlado de aprobación bancaria y reinicio de etapas dependientes cuando corresponde.
+- Eliminación de archivos desde administración.
+- Flujo de ratificación, banco, PDFs, evidencia y cierre.
 
-Infraestructura:
-- `package.json` idéntico a V22.2 proporcionada.
-- `wrangler.jsonc` idéntico a V22.2 proporcionada.
-- No requiere variables, bindings ni secrets nuevos.
-
-
-## Corrección V22.3.2
-- Corrige Paso 3 del administrador detenido en “Cargando estado…”.
-- El administrador de archivos ahora usa listas de documentos disponibles en el frontend y no funciones exclusivas del backend.
+No modifica `wrangler.jsonc`, `package.json`, KV, R2, secrets ni variables existentes.
