@@ -13,7 +13,7 @@
 //   Opciones de cuota -> ratificación con cliente -> respuesta final del banco -> PDFs para firma/huella -> entrega con foto y geolocalización.
 
 const MODEL_DEFAULT = "gpt-5.4-mini";
-const ZASHOME_CATALOG_URL = "https://api.zashome.dpdns.org/api/integrations/excel/catalog";
+const ZASHOME_CATALOG_URL = "https://api.zashome.com.gt/api/integrations/excel/catalog";
 const CASE_PREFIX = "case:";
 const VENDORS_KEY = "config:vendors"; // compatibilidad legado
 const SELLER_PREFIX = "seller:";
