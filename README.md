@@ -1,15 +1,12 @@
-# CrediZas Worker V22.4
+# CrediZas Worker V22.5
 
-Base: V22.3.3, conservando la infraestructura y configuración de V22.2.
+Base: V22.4 estable.
 
 Cambios principales:
-- OCR de cuotas automático al seleccionar una o varias imágenes.
-- Las imágenes de cuotas siguen siendo temporales y no se guardan en R2.
-- OCR de cuotas usa estructura visual de Tesseract (blocks/words), corrige confusiones como 1O -> 10 y empareja Plazo/Cuota por fila.
-- OCR de aprobación bancaria automático al seleccionar la imagen.
-- Detección reforzada de Plazo, incluyendo fallback por posición visual.
-- Paso 3 administrativo progresivo: después de completar una acción desaparece su formulario y solo se muestra la siguiente tarea.
-- Flujo administrador: Cuotas -> Ratificación -> Respuesta banco -> 2 PDF -> Evidencia vendedor -> Cierre.
-- Flujo vendedor también oculta formularios ya completados y muestra solo la acción pendiente.
-- Las imágenes de aprobación bancaria continúan guardándose como respaldo del expediente.
-- No modifica package.json, wrangler.jsonc, bindings, KV, R2, secrets ni variables existentes.
+- Datos OCR de aprobación bancaria editables antes de guardar (incluye plazo si Tesseract se equivoca).
+- Documentos firmados aceptan imágenes o PDF.
+- Geolocalización mediante enlace compartido de Google Maps; CrediZas resuelve latitud/longitud automáticamente.
+- Eliminados “Fuente de ubicación” y “Usar ubicación del dispositivo”.
+- Corregido `/api/stage3/delivery` para el nuevo formato de ubicación y archivos firmados.
+- Barra global de progreso en operaciones de envío/guardado para vendedor y administrador; permanece visible hasta recibir respuesta del servidor.
+- No cambia wrangler.jsonc, package.json, KV, R2 ni secrets.
