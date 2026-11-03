@@ -1,18 +1,15 @@
-# CrediZas Worker V22.3.3
+# CrediZas Worker V22.4
 
-Corrección de compatibilidad del Paso 3 en administración.
+Base: V22.3.3, conservando la infraestructura y configuración de V22.2.
 
-## Corrección principal
-- `adminDocManagerHtml()` ya no puede bloquear el render del Paso 3.
-- Normaliza y filtra documentos heredados/incompletos.
-- Si el administrador de archivos encuentra un error, muestra una advertencia y el Paso 3 continúa cargando.
-- `wireAdminDocDelete()` también queda protegido contra nodos/IDs inválidos.
-- Compatible con expedientes antiguos que todavía conservan `stage3_documents.quote_evidence` de V22.1/V22.2.
-
-## Conserva
-- OCR temporal de cuotas sin guardar nuevas fotos en R2.
-- OCR de aprobación final del banco.
-- Eliminación de archivos desde administración.
-- Flujo de ratificación, banco, PDFs, evidencia y cierre.
-
-No modifica `wrangler.jsonc`, `package.json`, KV, R2, secrets ni variables existentes.
+Cambios principales:
+- OCR de cuotas automático al seleccionar una o varias imágenes.
+- Las imágenes de cuotas siguen siendo temporales y no se guardan en R2.
+- OCR de cuotas usa estructura visual de Tesseract (blocks/words), corrige confusiones como 1O -> 10 y empareja Plazo/Cuota por fila.
+- OCR de aprobación bancaria automático al seleccionar la imagen.
+- Detección reforzada de Plazo, incluyendo fallback por posición visual.
+- Paso 3 administrativo progresivo: después de completar una acción desaparece su formulario y solo se muestra la siguiente tarea.
+- Flujo administrador: Cuotas -> Ratificación -> Respuesta banco -> 2 PDF -> Evidencia vendedor -> Cierre.
+- Flujo vendedor también oculta formularios ya completados y muestra solo la acción pendiente.
+- Las imágenes de aprobación bancaria continúan guardándose como respaldo del expediente.
+- No modifica package.json, wrangler.jsonc, bindings, KV, R2, secrets ni variables existentes.
