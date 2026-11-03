@@ -1,29 +1,34 @@
-# CrediZas Worker V22.1
+# CrediZas V22.2
 
-Base: V21.8 estable.
+Versión basada en V22.1. Mantiene los bindings, KV, R2, variables y secrets existentes.
 
-## Paso 3
-- Admin aprueba Formalización y se habilita Paso 3.
-- Admin carga opciones de plazo/cuota.
-- Vendedor ratifica con cliente una opción.
-- Admin registra envío por correo y respuesta final del banco: autorización, cupo, enganche, plazo y cuota.
-- Admin carga exactamente dos PDF para firma/huella.
-- Vendedor descarga documentos y registra entrega con foto + geolocalización.
+## Paso 3 actualizado
 
-## Respuestas a requerimientos
-Cuando Admin usa REQUIERE INFORMACIÓN en Paso 1 o Paso 2, vendedor debe responder qué corrigió/aclaró al reenviar.
+1. El administrador sube una o varias fotos del listado de plazos/cuotas.
+2. Tesseract.js OCR (ejecutado en el navegador) detecta pares Plazo + Cuota usando también la posición visual de los números.
+3. El administrador revisa/corrige las opciones detectadas y escribe el enganche (puede ser Q0.00).
+4. El administrador envía las opciones al vendedor.
+5. El vendedor ve un selector combinado `Plazo — Cuota`, confirma con el cliente y ratifica una sola opción.
+6. Solo después de la ratificación se habilita al administrador la sección de solicitud/respuesta final del banco.
+7. Al guardar la respuesta final se habilita la carga de exactamente dos PDF para firma y huella.
+8. El vendedor descarga los PDF y como último paso sube:
+   - selfie/foto final del cliente;
+   - una o varias fotos de los documentos firmados;
+   - geolocalización (manual, dispositivo o futura API ZasHome).
+9. El administrador revisa la evidencia y pulsa `Crédito finalizado con éxito`.
 
-## Ejemplos configurables
-Admin puede subir ejemplos de selfie con DPI, documento de domicilio, firma/huella y foto de entrega. Se guardan en R2 usando la KV y bindings existentes.
+## Tracking para el vendedor
 
-## Geolocalización
-Manual o GPS del dispositivo. Se incluye opción de fuente ZasHome para futura integración API; no se llama todavía a una API geográfica porque no se ha definido su endpoint/contrato.
+El listado de solicitudes muestra una línea de tiempo visual:
 
+Ingresado → Precalificación → Formalización → Cuotas → Ratificado → Banco → Firma → Evidencia → Finalizado
 
-## V22.1 · Evidencia de cuotas
+Así el asesor puede consultar rápidamente en qué punto está el cliente.
 
-- El administrador sigue siendo quien define y envía las opciones estructuradas de **plazo + cuota**.
-- El vendedor solo puede ratificar **una opción de las enviadas por el administrador**.
-- El administrador puede guardar opcionalmente de 1 a 8 imágenes del listado original de cuotas/plazos recibido.
-- Las imágenes son solo respaldo visual y se almacenan en R2; no sustituyen los valores estructurados.
-- El vendedor puede abrir las imágenes de respaldo mientras consulta las opciones enviadas.
+## OCR
+
+Se usa Tesseract.js v5 desde CDN en el navegador. Las imágenes se procesan en el navegador y luego se conservan en R2 como respaldo del expediente. Si el OCR no reconoce correctamente una fila, el administrador puede corregirla o agregarla manualmente antes de enviarla al vendedor.
+
+## Infraestructura
+
+No se modifican `wrangler.jsonc`, `package.json`, KV, R2, secrets ni variables existentes.
