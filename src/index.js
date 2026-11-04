@@ -2185,6 +2185,26 @@ const APP_HTML = String.raw`<!doctype html>
 <script>
 const q=s=>document.querySelector(s);
 
+// Helpers de estado disponibles también en el navegador.
+// Mantienen la misma lógica que el backend para expedientes nuevos y heredados.
+function stage1State(record){
+  return record?.stage1?.control?.estado || (record?.stage1 ? (record?.proceso === "PRECALIFICACION" ? (record?.estado || "SUBIDA") : "APROBADA") : "");
+}
+function formalizationControl(record){
+  if(record?.stage2?.control) return record.stage2.control;
+  if(record?.formalizacion_control) return record.formalizacion_control;
+  return null;
+}
+function formalizationState(record){
+  if(stage1State(record) !== "APROBADA") return "";
+  const ratified=Boolean(record?.stage3?.seller_ratification?.confirmed);
+  if(!ratified && !record?.stage2) return "";
+  const ctl=formalizationControl(record);
+  if(ctl?.estado) return ctl.estado;
+  if(record?.stage2) return record?.estado || "SUBIDA";
+  return "REQUIERE DATOS";
+}
+
 let __sendProgressCount=0,__sendProgressTimer=null,__sendProgressValue=6;
 function showGlobalSendProgress(title="Procesando información…"){const box=document.getElementById("globalSendProgress"),bar=document.getElementById("globalSendBar"),pct=document.getElementById("globalSendPct"),ttl=document.getElementById("globalSendTitle");__sendProgressCount++;if(!box)return;if(ttl)ttl.textContent=title;box.style.display="block";__sendProgressValue=6;if(bar)bar.style.width="6%";if(pct)pct.textContent="6%";clearInterval(__sendProgressTimer);__sendProgressTimer=setInterval(()=>{__sendProgressValue=Math.min(94,__sendProgressValue+Math.max(1,Math.round((96-__sendProgressValue)*.08)));if(bar)bar.style.width=__sendProgressValue+"%";if(pct)pct.textContent=__sendProgressValue+"%"},500)}
 function hideGlobalSendProgress(ok=true){__sendProgressCount=Math.max(0,__sendProgressCount-1);if(__sendProgressCount>0)return;clearInterval(__sendProgressTimer);const box=document.getElementById("globalSendProgress"),bar=document.getElementById("globalSendBar"),pct=document.getElementById("globalSendPct");if(bar)bar.style.width="100%";if(pct)pct.textContent="100%";setTimeout(()=>{if(box)box.style.display="none"},ok?350:800)}

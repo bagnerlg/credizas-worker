@@ -1,3 +1,9 @@
+# CrediZas V22.7.1
+
+Corrección de apertura de expedientes/Paso 3 para vendedor: los helpers `stage1State`, `formalizationControl` y `formalizationState` ahora existen también en el JavaScript del navegador.
+
+Base: V22.7. No cambia KV, R2, bindings, secrets ni configuración de Wrangler.
+
 # CrediZas Worker V22.7
 
 Base: V22.6 completa. Mantiene sin cambios `package.json`, `wrangler.jsonc`, KV, R2 y secrets existentes.
