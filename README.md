@@ -1,48 +1,44 @@
-# CrediZas V22.8
+# CrediZas V22.9
 
-Base: **V22.7.1**. Mantiene sin cambios `package.json`, `wrangler.jsonc`, KV, R2, bindings, secrets y recursos existentes.
+Base: **V22.8**. Mantiene sin cambios `package.json`, `wrangler.jsonc`, KV, R2, bindings, secrets y recursos existentes.
 
-## Correcciones y cambios
+## Cambios principales
 
-1. **Monto solicitado corregido**
-   - Usa el precio de catálogo de ZasHome.
-   - Fórmula: `precio + 10%`.
-   - Se conserva la aproximación comercial hacia arriba al siguiente múltiplo de Q50.
+1. **PDF Paso 1 enriquecido**
+   - Incluye miniatura del producto/combo seleccionado cuando la imagen del catálogo está disponible.
+   - Muestra descripción/nombre del producto, SKU y precio de catálogo recibido desde la API de ZasHome.
+   - Incluye monto solicitado y enganche de precalificación.
 
-2. **Cuotas estimadas como selector**
-   - 6, 8, 10, 12 y 18 meses.
-   - Usa las tasas ya definidas: 16.73%, 23.46%, 30.23%, 37.46% y 59.95%.
-   - 18 meses mantiene la advertencia de restricciones por récord crediticio.
+2. **Enganche de precalificación**
+   - Se calcula automáticamente como 5% del monto solicitado.
+   - Se presenta como referencia inicial y se aclara que puede ser Q0.00 según récord crediticio.
+   - Las cuotas estimadas aclaran que pueden ser menores según el récord crediticio del cliente.
 
-3. **Paso 1 después de enviar**
-   - El formulario deja de mostrarse al vendedor.
-   - Solo aparece `PRECALIFICACIÓN ENVIADA` y su estado.
-   - Si el administrador solicita una corrección, el botón cambia a `Ratificar datos`.
-   - Después de ratificar una corrección, la edición se cierra automáticamente.
+3. **Ratificación de condiciones antes de Formalización**
+   - El enganche real enviado por administración se presenta de forma grande y llamativa.
+   - El vendedor puede confirmar las condiciones o marcar `Cliente rechaza las condiciones`.
+   - El rechazo cierra el expediente con estado `CREDITO NO ACEPTADO POR CLIENTE`.
 
-4. **Corrección `setStageEditable is not defined`**
-   - La función existe ahora en el bundle del navegador y controla correctamente la edición de Paso 1 y Paso 2.
+4. **Progreso al preparar documentos de Formalización**
+   - Al seleccionar selfie, documento de domicilio o sustento de ingresos se muestra la ventana compacta de progreso mientras el navegador prepara los archivos.
+   - La lectura con IA continúa mostrando su progreso hasta finalizar.
 
-5. **Paso 2 después de enviar**
-   - Ya no vuelve a mostrar carga de documentos ni formulario si el expediente fue enviado.
-   - Solo queda visible `Expediente terminado / Completo / Resultado` con el mensaje de envío al administrador.
-   - Las correcciones solicitadas siguen habilitando nuevamente la edición.
+5. **Dirección completa Paso 2**
+   - Se fuerza la lectura directa del campo visible de dirección antes de construir el payload, evitando falsos mensajes de `Hace falta la dirección completa` cuando el usuario ya la escribió.
 
-6. **Progreso durante lectura IA**
-   - `Leer documentos y completar datos` muestra explícitamente la ventana compacta de progreso y la cierra al terminar.
+6. **PDF completo Paso 2**
+   - El PDF final se genera y persiste antes de ocultar el formulario del vendedor.
+   - Ya no se descartan silenciosamente errores de generación.
+   - Al enviarse Formalización, el administrador debe ver el enlace `P2` cuando la generación finaliza correctamente.
 
-7. **Paso 3 · documentos para firma**
-   - Ahora exige exactamente **3 PDF** en lugar de 2.
-   - Backend, frontend, estados y permisos usan el mismo requisito de tres documentos.
+7. **Seguimiento de Formalización**
+   - Un Paso 2 enviado en `SUBIDA`, `REINGRESADO`, `EN REVISION` o `REQUIERE DATOS` ya posiciona el seguimiento visual en `Formalización`.
+   - En Administración aparece una acción destacada `⚡ Revisar Formalización` en lugar de `Sin acción pendiente`.
+   - Al aprobar Formalización, la siguiente acción continúa siendo `⚡ Paso 3 · Banco y firma`.
 
-8. **Panel administrativo simplificado**
-   - La columna Estados muestra solo el paso activo.
-   - `Editar estado` permite modificar únicamente el estado activo.
-   - `Configuración → Editar pasos / estados` permite acceder a estados anteriores y abrir directamente Paso 1 o Paso 2 para editar sus campos.
-   - Ya no se muestran simultáneamente Precalificación y Formalización cuando la primera ya terminó.
-
-9. **Navegación**
-   - Se mantiene la navegación vendedor ↔ administrador en la misma pestaña introducida en V22.7.
+8. **Paso 3**
+   - Conserva el requisito de exactamente 3 PDF para firma y huella.
+   - Mantiene OCR bancario editable, evidencia final y cierre administrativo.
 
 ## Infraestructura
 
