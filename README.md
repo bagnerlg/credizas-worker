@@ -1,65 +1,51 @@
-# CrediZas V22.7.1
+# CrediZas V22.8
 
-Corrección de apertura de expedientes/Paso 3 para vendedor: los helpers `stage1State`, `formalizationControl` y `formalizationState` ahora existen también en el JavaScript del navegador.
+Base: **V22.7.1**. Mantiene sin cambios `package.json`, `wrangler.jsonc`, KV, R2, bindings, secrets y recursos existentes.
 
-Base: V22.7. No cambia KV, R2, bindings, secrets ni configuración de Wrangler.
+## Correcciones y cambios
 
-# CrediZas Worker V22.7
+1. **Monto solicitado corregido**
+   - Usa el precio de catálogo de ZasHome.
+   - Fórmula: `precio + 10%`.
+   - Se conserva la aproximación comercial hacia arriba al siguiente múltiplo de Q50.
 
-Base: V22.6 completa. Mantiene sin cambios `package.json`, `wrangler.jsonc`, KV, R2 y secrets existentes.
+2. **Cuotas estimadas como selector**
+   - 6, 8, 10, 12 y 18 meses.
+   - Usa las tasas ya definidas: 16.73%, 23.46%, 30.23%, 37.46% y 59.95%.
+   - 18 meses mantiene la advertencia de restricciones por récord crediticio.
 
-## Cambios principales
+3. **Paso 1 después de enviar**
+   - El formulario deja de mostrarse al vendedor.
+   - Solo aparece `PRECALIFICACIÓN ENVIADA` y su estado.
+   - Si el administrador solicita una corrección, el botón cambia a `Ratificar datos`.
+   - Después de ratificar una corrección, la edición se cierra automáticamente.
 
-1. **Nuevo cálculo del monto solicitado desde ZasHome**
-   - Endpoint: `https://api.zashome.com.gt/api/integrations/excel/catalog`.
-   - Fórmula: `(precio + 10% del precio) + precio`.
-   - El resultado se redondea siempre hacia arriba al siguiente múltiplo de Q50.
+4. **Corrección `setStageEditable is not defined`**
+   - La función existe ahora en el bundle del navegador y controla correctamente la edición de Paso 1 y Paso 2.
 
-2. **Cuotas estimadas en Paso 1**
-   - 6 meses: 16.73%.
-   - 8 meses: 23.46%.
-   - 10 meses: 30.23%.
-   - 12 meses: 37.46%.
-   - 18 meses: 59.95%, con aviso de restricciones según récord crediticio.
-   - Las cuotas se muestran al vendedor y quedan registradas en el expediente/PDF.
+5. **Paso 2 después de enviar**
+   - Ya no vuelve a mostrar carga de documentos ni formulario si el expediente fue enviado.
+   - Solo queda visible `Expediente terminado / Completo / Resultado` con el mensaje de envío al administrador.
+   - Las correcciones solicitadas siguen habilitando nuevamente la edición.
 
-3. **Nuevo orden del flujo**
-   - Paso 1 / Precalificación.
-   - Admin aprueba Precalificación.
-   - Admin envía cuotas reales.
-   - Vendedor ratifica plazo/cuota con el cliente.
-   - Se habilita Paso 2 / Formalización y sus documentos.
-   - Admin aprueba Formalización.
-   - Paso 3: respuesta final del banco, PDFs, firma, evidencia y cierre.
+6. **Progreso durante lectura IA**
+   - `Leer documentos y completar datos` muestra explícitamente la ventana compacta de progreso y la cierra al terminar.
 
-4. **Ventana compacta de progreso**
-   - Aparece abajo a la derecha durante cargas, envíos y guardados.
-   - Llega a 100% y se cierra automáticamente al terminar.
-   - Disponible para vendedor y administrador.
+7. **Paso 3 · documentos para firma**
+   - Ahora exige exactamente **3 PDF** en lugar de 2.
+   - Backend, frontend, estados y permisos usan el mismo requisito de tres documentos.
 
-5. **Borradores Paso 2**
-   - El vendedor puede borrar el borrador local.
-   - Vendedor o administrador pueden borrar el borrador de análisis guardado en servidor sin eliminar documentos.
-   - Al enviar Paso 2 correctamente se elimina el borrador de análisis para evitar que datos viejos reaparezcan.
+8. **Panel administrativo simplificado**
+   - La columna Estados muestra solo el paso activo.
+   - `Editar estado` permite modificar únicamente el estado activo.
+   - `Configuración → Editar pasos / estados` permite acceder a estados anteriores y abrir directamente Paso 1 o Paso 2 para editar sus campos.
+   - Ya no se muestran simultáneamente Precalificación y Formalización cuando la primera ya terminó.
 
-6. **Cobertura geográfica**
-   - Departamento, municipio y poblado usan listas sugeridas con `datalist`.
-   - Permiten escritura libre si el valor no existe en la lista.
-   - Se mantiene la validación BDA no bloqueante.
-
-7. **Estados administrativos protegidos**
-   - Los estados se muestran como etiquetas de solo lectura.
-   - Solo se habilitan los selectores al pulsar `Editar estados`.
-   - El proceso cambia automáticamente según el flujo; no existe selector manual de proceso.
-
-8. **Acciones administrativas más claras**
-   - Columna `Qué hacer ahora` con acción destacada para cuotas o Paso 3.
-   - Edición y eliminación quedan dentro de `Configuración`.
+9. **Navegación**
+   - Se mantiene la navegación vendedor ↔ administrador en la misma pestaña introducida en V22.7.
 
 ## Infraestructura
 
-No requiere crear ni modificar bindings, variables o secrets. Conserva los mismos recursos de V22.6.
+No requiere cambios de Cloudflare. El catálogo continúa usando:
 
-## Navegación simplificada
-
-Vendedor y administrador cambian de modo en la misma pestaña. El panel del vendedor usa **Ir a administrador** y el panel administrativo usa **Ir a vendedores**, evitando acumular ventanas durante pruebas u operación. Los documentos de consulta (por ejemplo PDF) pueden seguir abriéndose aparte.
+`https://api.zashome.com.gt/api/integrations/excel/catalog`
