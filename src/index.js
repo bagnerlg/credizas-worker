@@ -1433,6 +1433,18 @@ function caseSummary(record) {
     precio_catalogo: Number(sol?.producto_precio_catalogo || 0),
     monto: Number(sol?.monto_total_solicitado || 0),
     ingreso: Number(comp?.ingreso_promedio_mensual || 0),
+    // Los datos territoriales ya están persistidos en Paso 1; exponerlos también en el listado.
+    departamento: comp?.departamento || "",
+    municipio: comp?.municipio || "",
+    poblado: comp?.poblado || "",
+    tipo_vivienda: comp?.tipo_vivienda || "",
+    fuente_ingresos: comp?.fuente_ingresos || "",
+    origen_ingresos: comp?.origen_ingresos || "",
+    subtipo_ingreso: comp?.subtipo_ingreso || "",
+    nivel_educacion: comp?.nivel_educacion || "",
+    estado_civil: b?.estado_civil || "",
+    fecha_nacimiento: b?.fecha_nacimiento || "",
+    cobertura_bda: comp?.cobertura_bda?.label || comp?.cobertura_bda?.status || "",
     proceso: process,
     estado: activeCaseState(record),
     estado_precalificacion: p1,
@@ -1881,49 +1893,200 @@ function currentControlForRecord(record) {
   return null;
 }
 
+// Orden explícito del Excel completo. Independiente de las columnas visibles en la tabla.
+// Los datos provienen de los expedientes ya almacenados en KV; no se consultan ni alteran las fuentes externas.
 const ADMIN_EXPORT_FIELDS = {
-  updated_at: "Fecha actualización",
+  id: "ID expediente",
   created_at: "Fecha creación",
-  nombre: "Cliente",
+  updated_at: "Última actualización",
+  stage1_submitted_at: "Fecha envío Precalificación",
+  stage2_submitted_at: "Fecha envío Formalización",
+  vendedor: "Vendedor",
+  vendedor_id: "ID vendedor",
+  nombre: "Nombre completo cliente",
   dpi: "DPI",
   nit: "NIT",
-  telefono: "Teléfono",
-  vendedor: "Vendedor",
-  proceso: "Proceso",
+  fecha_nacimiento: "Fecha nacimiento",
+  telefono: "Teléfono cliente",
+  estado_civil: "Estado civil",
+  nombre_conyuge: "Cónyuge",
+  genero: "Género",
+  nacionalidad: "Nacionalidad",
+  producto_interes: "Producto interés / línea",
+  producto: "Producto solicitado",
+  producto_id: "ID producto",
+  producto_sku: "SKU",
+  precio_catalogo: "Precio catálogo interno (Q)",
+  monto: "Monto solicitado (Q)",
+  enganche_precalificacion: "Enganche estimado 5% (Q)",
+  cuota_estimada: "Cuota estimada seleccionada",
+  ingreso: "Ingreso promedio mensual (Q)",
+  fuente_ingresos: "Fuente de ingresos",
+  origen_ingresos: "Origen de ingresos",
+  subtipo_ingreso: "Subtipo de ingreso",
+  tipo_vivienda: "Tipo de vivienda",
+  departamento: "Departamento cliente",
+  municipio: "Municipio cliente",
+  poblado: "Aldea / caserío / poblado",
+  cobertura_bda: "Cobertura BDA",
+  cobertura_detalle: "Detalle cobertura BDA",
+  nivel_educacion: "Nivel educación",
+  direccion_completa: "Dirección completa domicilio",
+  nombre_empresa: "Empresa / institución",
+  giro_oficio: "Giro / actividad / oficio",
+  direccion_empresa: "Dirección empresa / actividad",
+  telefono_empresa: "Teléfono empresa / actividad",
+  antiguedad: "Antigüedad laboral / actividad",
+  referencia_1_nombre: "Referencia 1 nombre",
+  referencia_1_parentesco: "Referencia 1 parentesco",
+  referencia_1_celular: "Referencia 1 celular",
+  referencia_2_nombre: "Referencia 2 nombre",
+  referencia_2_parentesco: "Referencia 2 parentesco",
+  referencia_2_celular: "Referencia 2 celular",
+  referencia_3_nombre: "Referencia 3 nombre",
+  referencia_3_parentesco: "Referencia 3 parentesco",
+  referencia_3_celular: "Referencia 3 celular",
+  proceso: "Proceso actual",
   estado: "Estado actual",
   estado_precalificacion: "Estado Precalificación",
   estado_formalizacion: "Estado Formalización",
+  estado_paso3: "Estado Paso 3",
   detalle: "Detalle / información requerida",
   procede: "Qué procede con el cliente",
-  producto: "Producto",
-  producto_sku: "SKU",
-  precio_catalogo: "Precio catálogo interno",
-  monto: "Monto solicitado",
-  ingreso: "Ingreso promedio mensual",
-  estado_paso3: "Estado Paso 3",
+  pending_for: "Pendiente de",
+  pending_detail: "Siguiente acción",
   respuesta_vendedor_precalificacion: "Respuesta vendedor P1",
-  respuesta_vendedor_formalizacion: "Respuesta vendedor P2"
+  respuesta_vendedor_formalizacion: "Respuesta vendedor P2",
+  cotizaciones_banco: "Cuotas reales propuestas (plazo y cuota)",
+  enganche_real_cotizado: "Enganche real propuesto (Q)",
+  cuotas_enviadas_at: "Fecha envío cuotas",
+  cliente_no_contesta_at: "Fecha cliente no contesta",
+  cliente_retomado_at: "Fecha retomar contacto",
+  cliente_rechazo_at: "Fecha rechazo cliente",
+  cliente_rechazo_nota: "Motivo rechazo cliente",
+  plazo_ratificado: "Plazo ratificado (meses)",
+  cuota_ratificada: "Cuota ratificada (Q)",
+  enganche_ratificado: "Enganche ratificado (Q)",
+  fecha_ratificacion: "Fecha ratificación",
+  numero_autorizacion: "Autorización bancaria",
+  cupo_aprobado: "Cupo aprobado banco (Q)",
+  enganche_aprobado: "Enganche aprobado banco (Q)",
+  plazo_aprobado: "Plazo aprobado banco (meses)",
+  cuota_aprobada: "Cuota aprobada banco (Q)",
+  fecha_respuesta_banco: "Fecha respuesta banco",
+  fecha_registro_aprobacion: "Fecha registro aprobación",
+  fecha_documentos_firma: "Fecha documentos para firma",
+  documentos_firma_cantidad: "PDF firma cargados",
+  evidencia_entrega_at: "Fecha evidencia final",
+  ubicacion_entrega: "Ubicación Google Maps",
+  fecha_finalizacion: "Fecha cierre crédito",
+  closed_at: "Fecha cierre / rechazo",
+  eventos_registrados: "Cantidad eventos bitácora",
+  ultimo_evento: "Último evento bitácora"
 };
 
+const ADMIN_EXPORT_NUMBERS = new Set([
+  "precio_catalogo","monto","enganche_precalificacion","ingreso",
+  "enganche_real_cotizado","plazo_ratificado","cuota_ratificada","enganche_ratificado",
+  "cupo_aprobado","enganche_aprobado","plazo_aprobado","cuota_aprobada",
+  "documentos_firma_cantidad","eventos_registrados"
+]);
+const ADMIN_EXPORT_DATES = new Set([
+  "created_at","updated_at","stage1_submitted_at","stage2_submitted_at",
+  "cuotas_enviadas_at","cliente_no_contesta_at","cliente_retomado_at","cliente_rechazo_at",
+  "fecha_ratificacion","fecha_respuesta_banco","fecha_registro_aprobacion","fecha_documentos_firma",
+  "evidencia_entrega_at","fecha_finalizacion","closed_at"
+]);
+
+function exportCaseRow(rec) {
+  const summary=caseSummary(rec);
+  const s1=rec?.stage1?.data||{};
+  const basic=s1?.datos_basicos||{};
+  const sol=s1?.solicitud||{};
+  const comp=s1?.informacion_complementaria||{};
+  const s2=rec?.stage2?.data||{};
+  const dom=s2?.domicilio||{};
+  const dig=s2?.digitacion||{};
+  const refs=Array.isArray(s2?.referencias)?s2.referencias:[];
+  const stage3=rec?.stage3||{};
+  const quotes=stage3?.quotes||{};
+  const rat=stage3?.seller_ratification||{};
+  const bank=stage3?.bank_approval||{};
+  const delivery=stage3?.delivery||{};
+  const followup=stage3?.client_followup||{};
+  const rejection=stage3?.client_rejection||{};
+  const history=visibleCaseHistory(rec);
+  const result={...summary,
+    nombre_conyuge:basic?.nombre_conyuge||"", genero:basic?.genero||"",
+    nacionalidad:comp?.tipo_nacionalidad||"", producto_interes:basic?.producto_interes||"",
+    producto_id:sol?.producto_id||"", enganche_precalificacion:sol?.enganche_precalificacion??"",
+    cuota_estimada:sol?.cuota_estimada_seleccion||"",
+    cobertura_detalle:comp?.cobertura_bda?.detail||"",
+    direccion_completa:dom?.direccion_completa||"",
+    nombre_empresa:dig?.nombre_empresa||"", giro_oficio:dig?.giro_oficio||"",
+    direccion_empresa:dig?.direccion_empresa||"", telefono_empresa:dig?.telefono_empresa||"",
+    antiguedad:dig?.antiguedad||"",
+    cotizaciones_banco:Array.isArray(quotes.options)?quotes.options.map(o=>`${o.term_months??""} meses: Q${o.monthly_payment??""}`).join(" | "):"",
+    enganche_real_cotizado:quotes?.down_payment??"",
+    cuotas_enviadas_at:quotes?.sent_at||"",
+    cliente_no_contesta_at:followup?.started_at||"",
+    cliente_retomado_at:followup?.resumed_at||"",
+    cliente_rechazo_at:rejection?.rejected_at||"",
+    cliente_rechazo_nota:rejection?.note||"",
+    plazo_ratificado:rat?.term_months??"", cuota_ratificada:rat?.monthly_payment??"",
+    enganche_ratificado:rat?.down_payment??"",fecha_ratificacion:rat?.confirmed_at||"",
+    numero_autorizacion:bank?.authorization_number||"",cupo_aprobado:bank?.approved_amount??"",
+    enganche_aprobado:bank?.down_payment??"",plazo_aprobado:bank?.term_months??"",
+    cuota_aprobada:bank?.monthly_payment??"",fecha_respuesta_banco:bank?.response_date||"",
+    fecha_registro_aprobacion:bank?.recorded_at||"",
+    fecha_documentos_firma:stage3?.documents_ready_at||"",
+    documentos_firma_cantidad:rec?.stage3_documents?.approval_pdfs?.length??"",
+    evidencia_entrega_at:delivery?.delivered_at||delivery?.received_at||"",
+    ubicacion_entrega:delivery?.location_url||"",
+    fecha_finalizacion:stage3?.finalized_at||"",closed_at:rec?.closed_at||"",
+    eventos_registrados:history.length,
+    ultimo_evento:history.length?history[history.length-1].event||"":""
+  };
+  for(let i=0;i<3;i++){
+    const r=refs[i]||{};
+    result[`referencia_${i+1}_nombre`]=r?.nombre_completo||"";
+    result[`referencia_${i+1}_parentesco`]=r?.parentesco||"";
+    result[`referencia_${i+1}_celular`]=r?.celular||"";
+  }
+  return result;
+}
+
 function xmlEscape(v) {
-  return String(v ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;").replace(/'/g,"&apos;");
+  // En XML 1.0 no son válidos los caracteres de control, aun si se escapan con entidades.
+  return String(v ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,"")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;").replace(/'/g,"&apos;");
+}
+
+function exportDate(v) {
+  if(!v)return "";
+  // Mantener las fechas de solo calendario tal como las digitó el usuario.
+  const raw=String(v);
+  const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if(match)return `${match[3]}/${match[2]}/${match[1]}`;
+  const parsed=new Date(raw);
+  if(Number.isNaN(parsed.getTime()))return raw;
+  return new Intl.DateTimeFormat("es-GT",{timeZone:"America/Guatemala",day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).format(parsed);
 }
 
 function makeExcelXml(records, fields) {
-  const cols = fields.filter(f => ADMIN_EXPORT_FIELDS[f]);
-  const cell = (value, type="String") => `<Cell><Data ss:Type="${type}">${xmlEscape(value)}</Data></Cell>`;
-  const rows = [];
-  rows.push(`<Row>${cols.map(f => cell(ADMIN_EXPORT_FIELDS[f])).join("")}</Row>`);
+  const cols=fields.filter(f=>Object.hasOwn(ADMIN_EXPORT_FIELDS,f));
+  const cell=(value,type="String")=>`<Cell><Data ss:Type="${type}">${xmlEscape(value)}</Data></Cell>`;
+  const rows=[`<Row>${cols.map(f=>cell(ADMIN_EXPORT_FIELDS[f])).join("")}</Row>`];
   for (const rec of records) {
-    const row = caseSummary(rec);
-    rows.push(`<Row>${cols.map(f => {
-      let v = row[f] ?? "";
-      if (["monto","ingreso","precio_catalogo"].includes(f)) return cell(Number(v || 0), "Number");
-      if (["updated_at","created_at"].includes(f) && v) { try { v = new Date(v).toLocaleString("es-GT"); } catch {} }
+    const row=exportCaseRow(rec);
+    rows.push(`<Row>${cols.map(f=>{
+      let v=row[f]??"";
+      if(ADMIN_EXPORT_DATES.has(f))v=exportDate(v);
+      if(ADMIN_EXPORT_NUMBERS.has(f)&&v!==""&&v!==null&&Number.isFinite(Number(v)))return cell(Number(v),"Number");
       return cell(v);
     }).join("")}</Row>`);
   }
-  return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="CrediZas"><Table>${rows.join("")}</Table></Worksheet></Workbook>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="Expedientes CrediZas"><Table>${rows.join("")}</Table></Worksheet></Workbook>`;
 }
 
 // -----------------------------
@@ -2722,7 +2885,7 @@ const ADMIN_HTML = String.raw`<!doctype html><html lang="es"><head><meta charset
 <div id="adminApp" class="hidden">
 <div class="card"><details><summary style="cursor:pointer;font-weight:900">Configuración · Ejemplos para vendedores</summary><div class="msg" style="margin-top:8px">Sube ejemplos visuales que los vendedores podrán consultar.</div><div class="fields" id="exampleConfig" style="margin-top:10px"><label>Selfie con DPI <input type="file" data-example="selfie_dpi" accept="image/*,.pdf"><button type="button" data-upload-example="selfie_dpi">Guardar</button></label><label>Recibo / domicilio <input type="file" data-example="recibo_domicilio" accept="image/*,.pdf"><button type="button" data-upload-example="recibo_domicilio">Guardar</button></label><label>Firma y huella <input type="file" data-example="firma_huella" accept="image/*,.pdf"><button type="button" data-upload-example="firma_huella">Guardar</button></label><label>Entrega con producto <input type="file" data-example="entrega_producto" accept="image/*,.pdf"><button type="button" data-upload-example="entrega_producto">Guardar</button></label></div><div id="exampleAdminMsg" class="msg"></div></details></div>
 <div class="card"><div class="newbar"><div><strong>Nueva solicitud desde administración</strong><div class="msg">Selecciona el vendedor al que quedará vinculada.</div><select id="newSeller"><option value="">Seleccionar vendedor</option></select></div><button id="newCaseAdminBtn" class="yellow">Nueva solicitud</button></div></div>
-<div class="card"><div class="grid"><input id="fQ" placeholder="Nombre, DPI, NIT o teléfono"><select id="fStatus"><option value="">Todos los estados</option><option>SUBIDA</option><option value="EN REVISION">EN REVISIÓN</option><option value="REQUIERE DATOS">REQUIERE INFORMACIÓN</option><option>REINGRESADO</option><option>APROBADA</option><option>RECHAZADA</option></select><select id="fProcess"><option value="">Todos los procesos</option><option value="PRECALIFICACION">PRECALIFICACIÓN</option><option value="FORMALIZACION DE CREDITO">FORMALIZACIÓN DE CRÉDITO</option></select><select id="fSeller"><option value="">Todos los vendedores</option></select><select id="fSort"><option value="updated_desc">Más recientes</option><option value="date_asc">Más antiguos</option><option value="name_asc">Nombre A-Z</option><option value="nit_asc">NIT</option></select></div><div class="actions" style="margin-top:9px"><button id="searchBtn">Buscar</button><button id="exportBtn" class="yellow">Descargar Excel</button><button id="switchSellerBtn" class="secondary">Ir a vendedores</button><button id="logoutBtn" class="secondary">Cerrar sesión</button></div><div id="adminActionMsg" class="msg"></div></div>
+<div class="card"><div class="grid"><input id="fQ" placeholder="Nombre, DPI, NIT o teléfono"><select id="fStatus"><option value="">Todos los estados</option><option>SUBIDA</option><option value="EN REVISION">EN REVISIÓN</option><option value="REQUIERE DATOS">REQUIERE INFORMACIÓN</option><option>REINGRESADO</option><option>APROBADA</option><option>RECHAZADA</option></select><select id="fProcess"><option value="">Todos los procesos</option><option value="PRECALIFICACION">PRECALIFICACIÓN</option><option value="FORMALIZACION DE CREDITO">FORMALIZACIÓN DE CRÉDITO</option></select><select id="fSeller"><option value="">Todos los vendedores</option></select><select id="fSort"><option value="updated_desc">Más recientes</option><option value="date_asc">Más antiguos</option><option value="name_asc">Nombre A-Z</option><option value="nit_asc">NIT</option></select></div><div class="actions" style="margin-top:9px"><button id="searchBtn">Buscar</button><button id="exportBtn" class="yellow">Descargar Excel completo</button><button id="exportVisibleBtn" class="secondary">Excel · columnas visibles</button><button id="switchSellerBtn" class="secondary">Ir a vendedores</button><button id="logoutBtn" class="secondary">Cerrar sesión</button></div><div id="adminActionMsg" class="msg"></div></div>
 <div class="card"><details><summary style="cursor:pointer;font-weight:800">Seleccionar columnas visibles</summary><div id="fieldChooser" class="fields" style="margin-top:10px"></div></details></div>
 <div class="card table"><table><thead><tr id="headRow"></tr></thead><tbody id="rows"></tbody></table></div></div></div>
 <script>
@@ -2732,7 +2895,7 @@ function showGlobalSendProgress(title="Procesando información…"){const box=do
 function hideGlobalSendProgress(ok=true){__sendProgressCount=Math.max(0,__sendProgressCount-1);if(__sendProgressCount>0)return;clearInterval(__sendProgressTimer);const box=document.getElementById("globalSendProgress"),bar=document.getElementById("globalSendBar"),pct=document.getElementById("globalSendPct");if(bar)bar.style.width="100%";if(pct)pct.textContent="100%";setTimeout(()=>{if(box)box.style.display="none"},ok?350:800)}
 function installGlobalSendProgress(){if(window.__credizasProgressFetch)return;window.__credizasProgressFetch=true;const nativeFetch=window.fetch.bind(window);window.fetch=async function(input,init){const method=String(init?.method||"GET").toUpperCase(),url=String(typeof input==="string"?input:(input?.url||"")),importantGet=method==="GET"&&(/\/documents\//.test(url)||/\/api\/(admin|seller)\/cases\/[^/?]+/.test(url)),track=!(["GET","HEAD"].includes(method))||importantGet;if(track)showGlobalSendProgress(method==="GET"?"Cargando información…":"Procesando información…");try{const r=await nativeFetch(input,init);if(track)hideGlobalSendProgress(r.ok);return r}catch(e){if(track)hideGlobalSendProgress(false);throw e}}}
 installGlobalSendProgress();
-const defs={pending_for:"Pendiente de",pending_detail:"Siguiente acción",created_at:"Fecha de ingreso",stage1_submitted_at:"Fecha Paso 1",stage2_submitted_at:"Fecha Paso 2",updated_at:"Fecha",nombre:"Cliente",dpi:"DPI",nit:"NIT",telefono:"Teléfono",vendedor:"Vendedor",producto:"Producto",monto:"Monto",ingreso:"Ingreso",proceso:"Proceso actual",estado_precalificacion:"Precalificación",estado_formalizacion:"Formalización",estado_paso3:"Paso 3",detalle:"Detalle",procede:"Qué procede"};let dataRows=[];let visible=["updated_at","nombre","dpi","telefono","vendedor","pending_for","estado_precalificacion","estado_formalizacion","estado_paso3"];const deletedIds=new Set();
+const defs={departamento:"Departamento",municipio:"Municipio",poblado:"Aldea / caserío",tipo_vivienda:"Vivienda",fuente_ingresos:"Fuente ingresos",origen_ingresos:"Origen ingresos",subtipo_ingreso:"Subtipo ingresos",nivel_educacion:"Educación",estado_civil:"Estado civil",fecha_nacimiento:"Fecha nacimiento",cobertura_bda:"Cobertura BDA",pending_for:"Pendiente de",pending_detail:"Siguiente acción",created_at:"Fecha de ingreso",stage1_submitted_at:"Fecha Paso 1",stage2_submitted_at:"Fecha Paso 2",updated_at:"Fecha",nombre:"Cliente",dpi:"DPI",nit:"NIT",telefono:"Teléfono",vendedor:"Vendedor",producto:"Producto",monto:"Monto",ingreso:"Ingreso",proceso:"Proceso actual",estado_precalificacion:"Precalificación",estado_formalizacion:"Formalización",estado_paso3:"Paso 3",detalle:"Detalle",procede:"Qué procede"};let dataRows=[];let visible=["updated_at","nombre","dpi","telefono","vendedor","pending_for","estado_precalificacion","estado_formalizacion","estado_paso3"];const deletedIds=new Set();
 function esc(v){return String(v??"").replace(/[&<>\"']/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;","'":"&#039;"}[s]))}function money(v){return "Q "+Number(v||0).toLocaleString("es-GT",{minimumFractionDigits:2,maximumFractionDigits:2})}function labelState(v){return v==="REQUIERE DATOS"?"REQUIERE INFORMACIÓN":v==="EN REVISION"?"EN REVISIÓN":v}function labelProcess(v){return v==="FORMALIZACION DE CREDITO"?"Formalización":"Precalificación"}
 function initFields(){const box=q("#fieldChooser");box.innerHTML=Object.entries(defs).map(([k,l])=>'<label><input type="checkbox" data-field="'+k+'" '+(visible.includes(k)?'checked':'')+'> '+l+'</label>').join("");box.querySelectorAll("input").forEach(x=>x.onchange=()=>{visible=[...box.querySelectorAll("input:checked")].map(i=>i.dataset.field);render()})}
 function display(c,k){if(["updated_at","created_at","stage1_submitted_at","stage2_submitted_at"].includes(k))return c[k]?new Date(c[k]).toLocaleString("es-GT"):"";if(k==="monto"||k==="ingreso")return money(c[k]);if(k==="proceso")return labelProcess(c[k]);if(k==="estado_precalificacion"||k==="estado_formalizacion")return c[k]?labelState(c[k]):"—";return c[k]??""}
@@ -2793,7 +2956,7 @@ async function search(){const r=await fetch(queryUrl("/api/admin/cases"),{cache:
 async function saveStageState(id,stage,btn,allMode=false){const c=dataRows.find(x=>x.id===id)||{},row=btn?.closest("tr"),selector=allMode?(stage==="PRECALIFICACION"?"[data-state-p1-all]":"[data-state-p2-all]"):(stage==="PRECALIFICACION"?"[data-state-p1]":"[data-state-p2]"),stateEl=row?.querySelector(selector);if(!stateEl){alert("No se encontró el control de estado. Recarga la página e intenta nuevamente.");return}const state=stateEl.value;let detail="",procede="";const existingDetail=stage==="PRECALIFICACION"?(c.detalle_precalificacion||""):(c.detalle_formalizacion||"");if(state==="REQUIERE DATOS")detail=prompt("¿Qué información debe corregir o completar el vendedor?",existingDetail)||"";if(state==="RECHAZADA")detail=prompt("¿Por qué no aplica al crédito?",existingDetail)||"";if((state==="REQUIERE DATOS"||state==="RECHAZADA")&&!detail.trim())return;if(stage==="FORMALIZACION DE CREDITO"&&state==="APROBADA")procede="Paso 3 · Respuesta final del banco, firma y entrega";const original=btn.textContent;btn.disabled=true;btn.textContent="Guardando…";try{const r=await fetch("/api/admin/cases/"+encodeURIComponent(id)+"/control",{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({etapa:stage,estado:state,detalle:detail,procede})}),raw=await r.text();let d={};try{d=raw?JSON.parse(raw):{}}catch{throw new Error("El servidor devolvió una respuesta no válida: "+raw.slice(0,180))}if(!r.ok)throw new Error(d.error||"No se pudo actualizar");const i=dataRows.findIndex(x=>x.id===id);if(i>=0&&d.case)dataRows[i]={...dataRows[i],...d.case};render();const msg=q("#adminActionMsg");if(msg){msg.className="msg notice success";msg.innerHTML=stage==="PRECALIFICACION"&&state==="APROBADA"?"<strong>Precalificación aprobada.</strong> Ahora corresponde enviar las cuotas reales al vendedor para que el cliente ratifique antes de Formalización.":"<strong>Estado guardado correctamente.</strong>"}setTimeout(()=>search().catch(()=>{}),900)}catch(e){alert(e.message||"No se pudo actualizar");btn.disabled=false;btn.textContent=original}}
 async function deleteCase(id){const c=dataRows.find(x=>x.id===id);if(!confirm("¿Eliminar definitivamente el expediente de "+(c?.nombre||"este cliente")+"? También se eliminarán sus PDFs y documentos guardados."))return;const r=await fetch("/api/admin/cases/"+encodeURIComponent(id),{method:"DELETE",cache:"no-store"}),raw=await r.text();let d={};try{d=raw?JSON.parse(raw):{}}catch{}if(!r.ok){alert(d.error||"No se pudo eliminar");return}deletedIds.add(String(id));dataRows=dataRows.filter(x=>String(x.id)!==String(id));render();const msg=q("#adminActionMsg");if(msg){msg.className="msg notice success";msg.innerHTML="<strong>Expediente eliminado.</strong> El registro, PDFs y documentos asociados fueron enviados a eliminación."}}
 async function uploadExample(type){const input=document.querySelector('[data-example="'+type+'"]'),file=input?.files?.[0];if(!file){alert("Selecciona un archivo.");return}const fd=new FormData();fd.append("file",file);const r=await fetch("/api/admin/examples/"+encodeURIComponent(type),{method:"POST",body:fd}),d=await r.json();q("#exampleAdminMsg").textContent=r.ok?"Ejemplo guardado: "+file.name:(d.error||"No se pudo guardar")}document.querySelectorAll("[data-upload-example]").forEach(b=>b.onclick=()=>uploadExample(b.dataset.uploadExample));
-q("#loginBtn").onclick=async()=>{const r=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({user:q("#adminUser").value,password:q("#adminPass").value})}),d=await r.json();q("#loginMsg").textContent=d.ok?"Ingreso correcto":(d.error||"No autorizado");if(d.ok){await loadSellers();search()}};q("#exitLoginBtn").onclick=()=>location.href="/";q("#switchSellerBtn").onclick=()=>location.href="/";q("#newCaseAdminBtn").onclick=()=>{const sid=q("#newSeller").value;if(!sid){alert("Selecciona un vendedor.");return}location.href="/?admin=1&seller_id="+encodeURIComponent(sid)};q("#searchBtn").onclick=search;q("#exportBtn").onclick=()=>{const u=queryUrl("/api/admin/export.xls");u.searchParams.set("fields",visible.join(","));location.href=u};q("#logoutBtn").onclick=async()=>{await fetch("/api/admin/logout",{method:"POST"});location.reload()};["#fQ","#fStatus","#fProcess","#fSeller","#fSort"].forEach(s=>q(s).addEventListener("change",search));initFields();search().then(()=>loadSellers());
+q("#loginBtn").onclick=async()=>{const r=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({user:q("#adminUser").value,password:q("#adminPass").value})}),d=await r.json();q("#loginMsg").textContent=d.ok?"Ingreso correcto":(d.error||"No autorizado");if(d.ok){await loadSellers();search()}};q("#exitLoginBtn").onclick=()=>location.href="/";q("#switchSellerBtn").onclick=()=>location.href="/";q("#newCaseAdminBtn").onclick=()=>{const sid=q("#newSeller").value;if(!sid){alert("Selecciona un vendedor.");return}location.href="/?admin=1&seller_id="+encodeURIComponent(sid)};q("#searchBtn").onclick=search;q("#exportBtn").onclick=()=>{location.href=queryUrl("/api/admin/export.xls")};q("#exportVisibleBtn").onclick=()=>{const u=queryUrl("/api/admin/export.xls");u.searchParams.set("fields",visible.join(","));location.href=u};q("#logoutBtn").onclick=async()=>{await fetch("/api/admin/logout",{method:"POST"});location.reload()};["#fQ","#fStatus","#fProcess","#fSeller","#fSort"].forEach(s=>q(s).addEventListener("change",search));initFields();search().then(()=>loadSellers());
 </script></body></html>`;
 
 // -----------------------------

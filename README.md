@@ -1,3 +1,9 @@
+# CrediZas V23.1
+
+Continuidad sobre V23.0. Se corrigió la exportación Excel administrativa; consulta `README_V23.1_EXCEL_ADMINISTRADOR.md`. Conserva todos los cambios y documentación anteriores.
+
+---
+
 # CrediZas V23.0
 
 Continuidad sobre la base oficial V22.9. Consulta `README_V23.0_CAMBIOS_Y_DESPLIEGUE.md` para las cuatro mejoras, limitaciones y pruebas.
