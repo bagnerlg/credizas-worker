@@ -1,3 +1,9 @@
+# CrediZas V23.0
+
+Continuidad sobre la base oficial V22.9. Consulta `README_V23.0_CAMBIOS_Y_DESPLIEGUE.md` para las cuatro mejoras, limitaciones y pruebas.
+
+---
+
 # CrediZas V22.9
 
 Base: **V22.8**. Mantiene sin cambios `package.json`, `wrangler.jsonc`, KV, R2, bindings, secrets y recursos existentes.
