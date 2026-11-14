@@ -77,3 +77,7 @@ Esta versión deriva de V23.3. Corrige `fetch()` de ambas integraciones para Clo
 ## V23.5 — Corrección del buscador al agregar varios productos
 
 El listado de resultados ahora se muestra inmediatamente después de la búsqueda, antes de las líneas ya seleccionadas, incluso al buscar un segundo o tercer producto. Consultar `README_V23.5_RESULTADOS_PRODUCTOS.md`.
+
+## V23.6 — Un único desplegable dentro de cada campo de domicilio
+
+Se corrigió la doble flecha y los botones externos de los campos departamento, municipio, aldea/colonia/barrio/caserío y zona. Ahora una sola flecha interior abre la lista, incluso si el campo ya tiene una selección, y se conserva la búsqueda o escritura manual. Ver `README_V23.6_SELECTORES_DOMICILIO.md`.
