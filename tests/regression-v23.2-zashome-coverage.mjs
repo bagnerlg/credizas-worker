@@ -45,7 +45,7 @@ assert.deepEqual(departments.departments,['GUATEMALA','SACATEPÉQUEZ']);
 assert.equal(seen.length,1);
 assert.equal(seen[0].url,official,'Debe usar URL oficial sin variable adicional');
 assert.equal(seen[0].options.headers.Authorization,undefined,'No envía Bearer en ruta pública');
-assert.equal(seen[0].options.redirect,'error','No seguir redirecciones con secrets');
+assert.equal(seen[0].options.redirect,'manual','Cloudflare exige redirect manual; validar destino antes de seguir');
 const guate=await (await get('/api/coverage/municipalities?department=GUATEMALA')).json();
 assert.deepEqual(guate.municipalities,['MIXCO','VILLA NUEVA']);
 assert.equal(seen.length,1,'Reutiliza la caché para seleccionar municipios');
@@ -66,7 +66,7 @@ env.ZASHOME_COVERAGE_URL=official+'?scenario=error';
 const offline=await (await get('/api/coverage/departments')).json();
 assert.equal(offline.source,'BDA_RESPALDO');
 assert(offline.departments.includes('GUATEMALA'));
-assert.equal(offline.api_status,'HTTP 503');
+assert.equal(offline.api_status,'ZasHome HTTP 503');
 
 const browser=await (await get('/')).text();
 assert(!browser.includes(env.ZASHOME_API_KEY),'El secreto no puede aparecer en el HTML');

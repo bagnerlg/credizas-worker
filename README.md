@@ -69,3 +69,7 @@ Base: **V22.8**. Mantiene sin cambios `package.json`, `wrangler.jsonc`, KV, R2, 
 No requiere cambios de Cloudflare. El catálogo continúa usando:
 
 `https://api.zashome.com.gt/api/integrations/excel/catalog`
+
+## CrediZas V23.4 — continuidad (14/11/2026)
+
+Esta versión deriva de V23.3. Corrige `fetch()` de ambas integraciones para Cloudflare Workers; mejora la venta FCB con precios unitarios editables por vendedor autorizado, total y subtotales en vivo, solicitudes que mezclan Combo/Individual/FCB, y refuerza la validación de stock sumado y el detalle de PDF. Ver `README_V23.4_CONEXIONES_PRECIOS_MIXTOS.md`.
