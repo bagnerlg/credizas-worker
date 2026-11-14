@@ -73,3 +73,7 @@ No requiere cambios de Cloudflare. El catálogo continúa usando:
 ## CrediZas V23.4 — continuidad (14/11/2026)
 
 Esta versión deriva de V23.3. Corrige `fetch()` de ambas integraciones para Cloudflare Workers; mejora la venta FCB con precios unitarios editables por vendedor autorizado, total y subtotales en vivo, solicitudes que mezclan Combo/Individual/FCB, y refuerza la validación de stock sumado y el detalle de PDF. Ver `README_V23.4_CONEXIONES_PRECIOS_MIXTOS.md`.
+
+## V23.5 — Corrección del buscador al agregar varios productos
+
+El listado de resultados ahora se muestra inmediatamente después de la búsqueda, antes de las líneas ya seleccionadas, incluso al buscar un segundo o tercer producto. Consultar `README_V23.5_RESULTADOS_PRODUCTOS.md`.
