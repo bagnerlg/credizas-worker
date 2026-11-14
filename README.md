@@ -1,3 +1,15 @@
+# CrediZas V23.3
+
+Continuidad completa sobre V23.2: prueba de conexión ZasHome, productos múltiples Combo/Individual/FCB, permisos FCB por asesor y bodega, Enter, selección desplegable editable de ubicaciones, y notas BDA por zona. Consulta `README_V23.3_FCB_MULTIPRODUCTO_BDA.md` para secretos, seguridad, pruebas y despliegue.
+
+---
+
+# CrediZas V23.2
+
+Continuidad sobre V23.1. Se habilitó por defecto la URL oficial de la API ZasHome Coberturas para departamentos y municipios, manteniendo BDA para poblados y reglas de crédito. Lee `README_V23.2_ZASHOME_COBERTURAS.md` para configuración, seguridad, pruebas y despliegue. Se conservaron todas las mejoras y documentos anteriores.
+
+---
+
 # CrediZas V23.1
 
 Continuidad sobre V23.0. Se corrigió la exportación Excel administrativa; consulta `README_V23.1_EXCEL_ADMINISTRADOR.md`. Conserva todos los cambios y documentación anteriores.
