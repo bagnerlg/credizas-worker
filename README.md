@@ -1,3 +1,5 @@
+> **V23.8:** separa Casos y Análisis en pestañas de Administración. El embudo y los resultados por departamento están únicamente en Análisis. Véase `README_V23.8_PESTANA_ANALISIS.md`.
+
 > **V23.7:** incluye tablero administrativo de métricas por día/mes/año, cierres por departamento y seguimiento no responde. Véase `README_V23.7_TABLERO_METRICAS.md`.
 
 # CrediZas V23.3
