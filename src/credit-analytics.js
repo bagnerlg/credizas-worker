@@ -146,3 +146,144 @@ export function buildCreditDashboard(records,{type='month',period='',seller_id='
     departments:rows,totals
   };
 }
+
+// V23.9 — Comparaciones de intervalos independientes, sin modificar expedientes.
+// Los casos enviados se miden por el primer envío del Paso 1, NO por updated_at.
+export const COMPARISON_METRIC_LABELS={
+  actividad:'Expedientes con actividad registrada',
+  ...ANALYTICS_METRIC_LABELS,
+  ingresadas:'Solicitudes enviadas (Paso 1)'
+};
+function validKey(type,key){return type==='day'?validDay(key):type==='month'?validMonth(key):validYear(key)}
+function comparisonRange(type,start,end,defaultKey){
+  const a=start===undefined||start===null||start===''?defaultKey:String(start);
+  const b=end===undefined||end===null||end===''?a:String(end);
+  if(!validKey(type,a)||!validKey(type,b))throw Error('Selecciona fechas válidas para los dos rangos.');
+  if(b<a)throw Error('La fecha final no puede ser anterior a la fecha inicial.');
+  const max=type==='day'?93:type==='month'?36:20;
+  const keys=[];
+  for(let at=a;at<=b;at=shiftPeriod(type,at,1)){
+    if(keys.length>=max)throw Error('El rango excede el límite de '+max+' '+(type==='day'?'días':type==='month'?'meses':'años')+'. Reduce las fechas para comparar.');
+    keys.push(at);
+  }
+  return {start:a,end:b,keys};
+}
+function firstDatedHistory(record,names){
+  const hits=(Array.isArray(record?.history)?record.history:[])
+    .filter(h=>names.includes(h?.event)&&localDateKey(h?.at))
+    .map(h=>h.at).sort();
+  return hits[0]||null;
+}
+function submissionInfo(record){
+  if(!record?.stage1)return {date:null,source:'none'};
+  const historical=firstDatedHistory(record,['STAGE1_SUBIDA','ADMIN_CREATE_STAGE1','STAGE1_REGISTRADA']);
+  if(historical)return {date:historical,source:'history'};
+  const corrected=firstDatedHistory(record,['STAGE1_REINGRESADO','ADMIN_EDIT_STAGE1']);
+  // Si solo quedan registros de corrección, NO los confundimos con un ingreso nuevo.
+  // La fecha de creación se utiliza como aproximación identificada de versiones anteriores.
+  if(corrected&&localDateKey(record.created_at))return {date:record.created_at,source:'legacy_created_at'};
+  if(localDateKey(record.stage1.submitted_at))return {date:record.stage1.submitted_at,source:corrected?'correction_only':'submitted_at'};
+  // Expedientes antiguos: no existe fecha de envío distinguible. Se identifica
+  // expresamente la estimación en lugar de ocultar un caso o inventar precisión.
+  if(localDateKey(record.created_at))return {date:record.created_at,source:'legacy_created_at'};
+  return {date:null,source:'none'};
+}
+function uniqueEventsV239(record){
+  const events=metricEvents(record).filter(e=>e.metric!=='ingresadas');
+  const add=(metric,at)=>{if(localDateKey(at))events.push({metric,at})};
+  const submission=submissionInfo(record);
+  add('ingresadas',submission.date);
+  // Actualización sin evento tipificado también implica actividad; por ejemplo
+  // un archivo reemplazado o un cambio administrativo en expedientes antiguos.
+  add('actividad',record?.updated_at);
+  for(const h of Array.isArray(record?.history)?record.history:[])add('actividad',h?.at);
+  if(!record?.updated_at)add('actividad',record?.stage1?.submitted_at);
+  return {events,submission};
+}
+function groupInRange(timestamp,type,range){
+  const key=periodKeyFromTimestamp(timestamp,type);
+  return key&&key>=range.start&&key<=range.end?key:null;
+}
+function computedCohort(rec){
+  const history=Array.isArray(rec?.history)?rec.history:[];
+  return {
+    aprobadas:rec?.stage1?.control?.estado==='APROBADA'||history.some(h=>h.event==='ADMIN_CONTROL_PRECALIFICACION'&&h.to_state==='APROBADA')||Boolean(rec?.stage3?.quotes?.options?.length)||Boolean(rec?.stage2),
+    con_oferta:Boolean(rec?.stage3?.quotes?.options?.length)||history.some(h=>h.event==='STAGE3_CUOTAS_ENVIADAS'),
+    aceptadas:Boolean(rec?.stage3?.seller_ratification?.confirmed)||history.some(h=>h.event==='STAGE3_RATIFICADO'),
+    formalizadas:Boolean(rec?.stage2)||history.some(h=>['STAGE2_SUBIDA','STAGE2_REINGRESADO','ADMIN_CREATE_STAGE2'].includes(h.event)),
+    finalizadas:String(rec?.stage3?.status||'')==='CREDITO FINALIZADO CON EXITO'
+  };
+}
+export function buildCreditDashboardComparison(records,{type='month',period='',seller_id='',start_a,end_a,start_b,end_b}={},now=new Date()){
+  const sel=resolvePeriod(type,period,now),t=sel.type;
+  const A=comparisonRange(t,start_a,end_a,sel.period);
+  const defaultBStart=shiftPeriod(t,A.start,-A.keys.length);
+  const defaultBEnd=shiftPeriod(t,A.start,-1);
+  const B=comparisonRange(t,start_b,(!start_b&&!end_b)?defaultBEnd:end_b,defaultBStart);
+  const ids=['actividad',...METRIC_IDS];
+  const fresh=()=>Object.fromEntries(ids.map(id=>[id,0]));
+  const counts={A:fresh(),B:fresh()};
+  const freshCohort=()=>({ingresadas:0,aprobadas:0,con_oferta:0,aceptadas:0,formalizadas:0,finalizadas:0});
+  const cohorts={A:freshCohort(),B:freshCohort()};
+  const groups=new Map();let recordsScanned=0,undatedFinalized=0,unknownAmount=0,activeNoAnswer=0,legacyA=0,legacyB=0,undatedSubmissions=0;
+  for(const rec of records||[]){
+    if(seller_id&&String(rec?.vendedor_id||'')!==String(seller_id))continue;
+    recordsScanned++;
+    const {events,submission}=uniqueEventsV239(rec);
+    const seen={A:new Set(),B:new Set()};
+    for(const {metric,at} of events){
+      if(!ids.includes(metric))continue;
+      for(const [name,rng] of [['A',A],['B',B]]){
+        if(!groupInRange(at,t,rng)||seen[name].has(metric))continue;
+        seen[name].add(metric);counts[name][metric]++;
+      }
+    }
+    if(rec?.stage1&&!submission.date)undatedSubmissions++;
+    const cohort=computedCohort(rec);
+    for(const [name,rng] of [['A',A],['B',B]]){
+      if(!groupInRange(submission.date,t,rng))continue;
+      const c=cohorts[name];c.ingresadas++;
+      for(const field of ['aprobadas','con_oferta','aceptadas','formalizadas','finalizadas'])if(cohort[field])c[field]++;
+      if(submission.source==='legacy_created_at')name==='A'?legacyA++:legacyB++;
+    }
+    if(rec?.stage3?.status==='CLIENTE NO CONTESTA')activeNoAnswer++;
+    const dep=normalizedDepartment(rec);
+    if(!groups.has(dep))groups.set(dep,{department:dep,count:{},amount:{},total_b:0,amount_b:0});
+    const last=finalizationTime(rec);
+    if(rec?.stage3?.status==='CREDITO FINALIZADO CON EXITO'&&!last)undatedFinalized++;
+    if(!last)continue;
+    const d=groups.get(dep),key=periodKeyFromTimestamp(last,t);
+    const amount=Number(rec?.stage3?.bank_approval?.approved_amount);
+    for(const [name,rng] of [['A',A],['B',B]]){
+      if(!groupInRange(last,t,rng))continue;
+      if(name==='A')d.count[key]=(d.count[key]||0)+1;
+      else d.total_b++;
+      if(Number.isFinite(amount)&&amount>0){
+        if(name==='A')d.amount[key]=(d.amount[key]||0)+amount;
+        else d.amount_b+=amount;
+        counts[name].monto_finalizado+=amount;
+      } else if(name==='A')unknownAmount++;
+    }
+  }
+  const rows=[...groups.values()].map(d=>({
+    department:d.department,
+    counts:A.keys.map(k=>d.count[k]||0),
+    amounts:A.keys.map(k=>d.amount[k]||0),
+    current:A.keys.reduce((n,k)=>n+(d.count[k]||0),0),
+    previous:d.total_b,
+    current_amount:A.keys.reduce((n,k)=>n+(d.amount[k]||0),0),
+    previous_amount:d.amount_b
+  })).sort((x,y)=>y.current-x.current||y.previous-x.previous||x.department.localeCompare(y.department,'es'));
+  const totals=A.keys.map((_,i)=>rows.reduce((acc,r)=>acc+r.counts[i],0));
+  return {
+    ok:true,timezone:GT_TIMEZONE,type:t,
+    period:A.end,previous:B.end,periods:A.keys,range_a:{start:A.start,end:A.end},range_b:{start:B.start,end:B.end},
+    metric_labels:COMPARISON_METRIC_LABELS,
+    metrics:Object.fromEntries(ids.map(id=>[id,{current:counts.A[id],previous:counts.B[id]}])),
+    cohorts:{current:cohorts.A,previous:cohorts.B},
+    departments:rows,totals,total_a:counts.A.finalizados,total_b:counts.B.finalizados,
+    active_no_answer:activeNoAnswer,records_scanned:recordsScanned,
+    undated_finalized:undatedFinalized,undated_submissions:undatedSubmissions,
+    legacy_submissions_current:legacyA,legacy_submissions_previous:legacyB,unknown_amount:unknownAmount
+  };
+}

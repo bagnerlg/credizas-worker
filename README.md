@@ -1,3 +1,5 @@
+> **V23.9:** corrige el conteo de envíos Paso 1, separa expedientes con actividad, permite comparar dos rangos de fechas y alinea columnas y totales del análisis. Ver `README_V23.9_ANALISIS_RANGOS_Y_RECONCILIACION.md`.
+
 > **V23.8:** separa Casos y Análisis en pestañas de Administración. El embudo y los resultados por departamento están únicamente en Análisis. Véase `README_V23.8_PESTANA_ANALISIS.md`.
 
 > **V23.7:** incluye tablero administrativo de métricas por día/mes/año, cierres por departamento y seguimiento no responde. Véase `README_V23.7_TABLERO_METRICAS.md`.
