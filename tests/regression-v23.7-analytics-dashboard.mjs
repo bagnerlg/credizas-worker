@@ -1,0 +1,48 @@
+import assert from 'node:assert/strict';
+import {writeFileSync,mkdtempSync} from 'node:fs';
+import {join} from 'node:path';
+import os from 'node:os';
+import {execFileSync} from 'node:child_process';
+import worker from '../src/index.js';
+import {buildCreditDashboard,resolvePeriod,shiftPeriod,localDateKey} from '../src/credit-analytics.js';
+assert.equal(localDateKey('2026-11-20T04:30:00Z'),'2026-11-19');
+assert.equal(shiftPeriod('month','2026-01',-1),'2025-12');
+assert.equal(shiftPeriod('day','2026-03-01',-1),'2026-02-28');
+assert.equal(resolvePeriod('day','2026-02-30',new Date('2026-11-20T12:00:00Z')).period,'2026-11-20');
+const make=(id,dept,status,at,amount,seller='sA')=>({id,vendedor_id:seller,created_at:'2026-11-18T18:00:00Z',stage1:{control:{estado:'APROBADA'},data:{informacion_complementaria:{departamento:dept}}},stage3:{status,...(at?{finalized_at:at}:{}),...(amount?{bank_approval:{approved_amount:amount,recorded_at:'2026-11-20T16:00:00Z'}}:{})},history:[]});
+const a=make('doneA','SACATEPEQUEZ','CREDITO FINALIZADO CON EXITO','2026-11-20T08:30:00Z',4300);
+const b=make('doneB','GUATEMALA','CREDITO FINALIZADO CON EXITO','2026-11-20T04:30:00Z',1200);
+const c=make('partial','GUATEMALA','RESPUESTA BANCO',null,1900);
+const d=make('wait','GUATEMALA','PENDIENTE RATIFICACION',null,0);d.stage3.client_followup={started_at:'2026-11-20T12:10:00Z',resumed_at:'2026-11-20T14:10:00Z'};d.history=[{event:'STAGE3_CLIENTE_NO_CONTESTA',at:'2026-11-20T12:10:00Z'},{event:'STAGE3_CONTACTO_RETOMADO',at:'2026-11-20T14:10:00Z'}];
+const e=make('reject','GUATEMALA','CREDITO NO ACEPTADO POR CLIENTE',null,0);e.stage3.client_rejection={rejected_at:'2026-11-20T18:00:00Z'};
+const old=make('old','PETÉN','CREDITO FINALIZADO CON EXITO',null,0);
+const other=make('other','IZABAL','CREDITO FINALIZADO CON EXITO','2026-11-20T20:00:00Z',2100,'sB');
+const cases=[a,b,c,d,e,old,other];
+const day=buildCreditDashboard(cases,{type:'day',period:'2026-11-20'});
+assert.equal(day.metrics.finalizados.current,2);assert.equal(day.metrics.finalizados.previous,1);
+assert.equal(day.metrics.monto_finalizado.current,6400);assert.equal(day.metrics.cliente_no_responde.current,1);
+assert.equal(day.metrics.contacto_retomado.current,1);assert.equal(day.metrics.cliente_rechaza.current,1);
+assert.equal(day.undated_finalized,1);assert.equal(day.metrics.banco_registrado.current,4);
+assert.equal(day.departments.find(r=>r.department==='SACATEPÉQUEZ').current,1);
+assert.equal(day.departments.find(r=>r.department==='GUATEMALA').previous,1);
+assert.equal(buildCreditDashboard(cases,{type:'day',period:'2026-11-20',seller_id:'sA'}).metrics.finalizados.current,1);
+assert.equal(buildCreditDashboard(cases,{type:'month',period:'2026-11'}).periods.length,6);
+assert.equal(buildCreditDashboard(cases,{type:'year',period:'2026'}).periods.length,5);
+class KV{db=new Map();calls=0;async get(k){return this.db.get(k)||null}async put(k,v){this.db.set(k,String(v))}async list({prefix='',limit=200,cursor}={}){this.calls++;const all=[...this.db.keys()].filter(k=>k.startsWith(prefix)).sort();const i=Number(cursor||0),end=Math.min(i+limit,all.length);return {keys:all.slice(i,end).map(name=>({name})),list_complete:end===all.length,cursor:end===all.length?undefined:String(end)}}}
+const kv=new KV(),env={CREDIZAS_KV:kv,ADMIN_USER:'admin',ADMIN_PASSWORD:'falsa-contrasena',ADMIN_SESSION_SECRET:'sesion-de-pruebas-larga'};
+for(let i=0;i<230;i++)await kv.put('case:dummy'+String(i).padStart(3,'0'),JSON.stringify({id:'dummy'+i,stage1:{control:{estado:'SUBIDA'}}}));
+for(const r of cases)await kv.put('case:'+r.id,JSON.stringify(r));
+const host='https://credizas.test',ep='/api/admin/analytics?type=day&period=2026-11-20';
+assert.equal((await worker.fetch(new Request(host+ep),env)).status,401);
+const login=await worker.fetch(new Request(host+'/api/admin/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user:env.ADMIN_USER,password:env.ADMIN_PASSWORD})}),env);
+assert.equal(login.status,200);const cookie=(login.headers.get('set-cookie')||'').split(';')[0];
+const res=await worker.fetch(new Request(host+ep,{headers:{cookie}}),env);assert.equal(res.status,200);const data=await res.json();
+assert.equal(data.records_scanned,237);assert.equal(data.metrics.finalizados.current,2);assert(kv.calls>=2);
+const filt=await (await worker.fetch(new Request(host+ep+'&seller_id=sA',{headers:{cookie}}),env)).json();assert.equal(filt.metrics.finalizados.current,1);
+const admin=await (await worker.fetch(new Request(host+'/admin'),env)).text(),seller=await (await worker.fetch(new Request(host+'/'),env)).text();
+for(const id of ['creditPeriodType','creditPeriodValue','creditReportSeller','creditReportKpis','creditFunnelRows','creditDeptRows'])assert(admin.includes('id="'+id+'"'),id);
+assert(admin.includes('Créditos finalizados por departamento'));assert(seller.includes('El cliente no responde'));assert(seller.includes('Retomar contacto'));
+for(const [label,html] of [['admin',admin],['seller',seller]])for(const [i,match] of [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].entries()){
+ const f=join(mkdtempSync(join(os.tmpdir(),'credizas-v237-')),label+i+'.js');writeFileSync(f,match[1]);execFileSync(process.execPath,['--check',f]);
+}
+console.log('OK V23.7: cierres exactos, seguimiento, día/mes/año Guatemala, 237 expedientes paginados, departamentos, montos, filtro vendedor, seguridad y sintaxis JS.');

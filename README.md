@@ -1,3 +1,5 @@
+> **V23.7:** incluye tablero administrativo de métricas por día/mes/año, cierres por departamento y seguimiento no responde. Véase `README_V23.7_TABLERO_METRICAS.md`.
+
 # CrediZas V23.3
 
 Continuidad completa sobre V23.2: prueba de conexión ZasHome, productos múltiples Combo/Individual/FCB, permisos FCB por asesor y bodega, Enter, selección desplegable editable de ubicaciones, y notas BDA por zona. Consulta `README_V23.3_FCB_MULTIPRODUCTO_BDA.md` para secretos, seguridad, pruebas y despliegue.
