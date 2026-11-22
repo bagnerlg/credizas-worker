@@ -3,7 +3,8 @@ const GT_TIMEZONE = 'America/Guatemala';
 const dtf = new Intl.DateTimeFormat('en-US', {timeZone:GT_TIMEZONE,year:'numeric',month:'2-digit',day:'2-digit'});
 const METRIC_IDS = [
   'ingresadas','precalificacion_aprobada','cuotas_enviadas','cliente_acepta',
-  'cliente_no_responde','contacto_retomado','cliente_rechaza','formalizacion_enviada',
+  'cliente_no_responde','contacto_retomado','cliente_rechaza',
+  'precalificacion_rechazada','formalizacion_rechazada','rechazo_administrativo','rechazadas_total','formalizacion_enviada',
   'formalizacion_aprobada','banco_registrado','finalizados','monto_finalizado'
 ];
 export const ANALYTICS_METRIC_LABELS = {
@@ -14,6 +15,10 @@ export const ANALYTICS_METRIC_LABELS = {
   cliente_no_responde:'Cliente no responde',
   contacto_retomado:'Contacto retomado',
   cliente_rechaza:'Cliente rechaza las condiciones',
+  precalificacion_rechazada:'Precalificaciones rechazadas (administrador)',
+  formalizacion_rechazada:'Formalizaciones rechazadas (administrador)',
+  rechazo_administrativo:'Total de rechazos administrativos',
+  rechazadas_total:'TOTAL DE SOLICITUDES RECHAZADAS (incluye cliente)',
   formalizacion_enviada:'Formalización enviada',
   formalizacion_aprobada:'Formalización aprobada',
   banco_registrado:'Respuesta bancaria registrada',
@@ -52,13 +57,26 @@ function normalizedDepartment(rec){
   const canon={'QUICHE':'QUICHÉ','PETEN':'PETÉN','SOLOLA':'SOLOLÁ','SACATEPEQUEZ':'SACATEPÉQUEZ','SUCHITEPEQUEZ':'SUCHITEPÉQUEZ','HUEHUETENANGO':'HUEHUETENANGO','ALTA VERAPAZ':'ALTA VERAPAZ','BAJA VERAPAZ':'BAJA VERAPAZ','EL PROGRESO':'EL PROGRESO'};
   return canon[key]||raw.toLocaleUpperCase('es-GT');
 }
+// Los rechazos son eventos, no simple estado final. Un expediente puede ser reabierto
+// y rechazado de nuevo; dentro de cada intervalo cuenta como máximo una vez por indicador.
+function rejectionState(rec){
+  const p1=String(rec?.stage1?.control?.estado || (rec?.proceso==='PRECALIFICACION'?rec?.estado:'') || (!rec?.stage1?.control?.estado && rec?.stage1?.decision?.status==='VALIDACION_NEGATIVA'?'RECHAZADA':'')).toUpperCase();
+  const p2=String(rec?.stage2?.control?.estado||rec?.formalizacion_control?.estado||(rec?.proceso==='FORMALIZACION DE CREDITO'?rec?.estado:'')).toUpperCase();
+  const client=String(rec?.stage3?.status||'')==='CREDITO NO ACEPTADO POR CLIENTE';
+  return {p1:p1==='RECHAZADA',p2:p2==='RECHAZADA',client};
+}
 function metricEvents(rec){
-  const ev=[];const add=(metric,at)=>{if(at&&localDateKey(at))ev.push({metric,at})};
+  const ev=[];const add=(metric,at,estimated=false)=>{if(at&&localDateKey(at))ev.push({metric,at,estimated})};
+  const rejection=(kind,at,estimated=false)=>{
+    add(kind,at,estimated);
+    if(kind!=='cliente_rechaza')add('rechazo_administrativo',at,estimated);
+    add('rechazadas_total',at,estimated);
+  };
   add('ingresadas',rec?.created_at||rec?.stage1?.submitted_at);
   add('cuotas_enviadas',rec?.stage3?.quotes?.sent_at);
   add('cliente_acepta',rec?.stage3?.seller_ratification?.confirmed_at);
   add('cliente_no_responde',rec?.stage3?.client_followup?.started_at);
-  add('cliente_rechaza',rec?.stage3?.client_rejection?.rejected_at);
+  rejection('cliente_rechaza',rec?.stage3?.client_rejection?.rejected_at);
   add('contacto_retomado',rec?.stage3?.client_followup?.resumed_at);
   add('formalizacion_enviada',rec?.stage2?.submitted_at);
   add('banco_registrado',rec?.stage3?.bank_approval?.recorded_at);
@@ -68,11 +86,28 @@ function metricEvents(rec){
     if(e==='ADMIN_CONTROL_FORMALIZACION'&&h.to_state==='APROBADA')add('formalizacion_aprobada',h.at);
     if(e==='STAGE3_CLIENTE_NO_CONTESTA')add('cliente_no_responde',h.at);
     if(e==='STAGE3_CONTACTO_RETOMADO')add('contacto_retomado',h.at);
-    if(e==='STAGE3_RECHAZADO_CLIENTE')add('cliente_rechaza',h.at);
+    if(e==='STAGE3_RECHAZADO_CLIENTE')rejection('cliente_rechaza',h.at);
+    if(e==='ADMIN_CONTROL_PRECALIFICACION'&&String(h.to_state||'').toUpperCase()==='RECHAZADA')rejection('precalificacion_rechazada',h.at);
+    if(e==='ADMIN_CONTROL_FORMALIZACION'&&String(h.to_state||'').toUpperCase()==='RECHAZADA')rejection('formalizacion_rechazada',h.at);
     if(e==='STAGE3_RATIFICADO')add('cliente_acepta',h.at);
     if(e==='STAGE3_CUOTAS_ENVIADAS')add('cuotas_enviadas',h.at);
     if(e==='STAGE2_SUBIDA'||e==='STAGE2_REINGRESADO')add('formalizacion_enviada',h.at);
     if(e==='STAGE3_BANCO_APROBADO'||e==='STAGE3_BANCO_APROBADO_OCR')add('banco_registrado',h.at);
+  }
+  // Compatibilidad para expedientes antiguos sin eventos tipificados.
+  // 'closed_at' lo fija el backend cuando rechaza. 'updated_at' es aproximado
+  // y se informa al administrador para no presentarlo como fecha comprobada.
+  const states=rejectionState(rec);
+  for(const [kind,active] of [
+    ['precalificacion_rechazada',states.p1],
+    ['formalizacion_rechazada',states.p2],
+    ['cliente_rechaza',states.client]
+  ]){
+    if(!active||ev.some(e=>e.metric===kind))continue;
+    const control=kind==='precalificacion_rechazada'?rec?.stage1?.control:kind==='formalizacion_rechazada'?(rec?.stage2?.control||rec?.formalizacion_control):rec?.stage3?.client_rejection;
+    const verified=control?.rejected_at||control?.decided_at||rec?.closed_at;
+    if(localDateKey(verified))rejection(kind,verified);
+    else if(localDateKey(rec?.updated_at))rejection(kind,rec.updated_at,true);
   }
   // Cerrados efectivos: nunca contar aprobaciones parciales, rechazos o aceptaciones de cuotas.
   if(String(rec?.stage3?.status||'')==='CREDITO FINALIZADO CON EXITO'){
@@ -225,17 +260,23 @@ export function buildCreditDashboardComparison(records,{type='month',period='',s
   const counts={A:fresh(),B:fresh()};
   const freshCohort=()=>({ingresadas:0,aprobadas:0,con_oferta:0,aceptadas:0,formalizadas:0,finalizadas:0});
   const cohorts={A:freshCohort(),B:freshCohort()};
-  const groups=new Map();let recordsScanned=0,undatedFinalized=0,unknownAmount=0,activeNoAnswer=0,legacyA=0,legacyB=0,undatedSubmissions=0;
+  const groups=new Map();let recordsScanned=0,undatedFinalized=0,unknownAmount=0,activeNoAnswer=0,legacyA=0,legacyB=0,undatedSubmissions=0,estimatedRejectionsA=0,estimatedRejectionsB=0,undatedRejections=0,currentlyRejected=0;
   for(const rec of records||[]){
     if(seller_id&&String(rec?.vendedor_id||'')!==String(seller_id))continue;
     recordsScanned++;
     const {events,submission}=uniqueEventsV239(rec);
+    const rejected=rejectionState(rec);
+    if(rejected.p1||rejected.p2||rejected.client){
+      currentlyRejected++;
+      if(!events.some(e=>e.metric==='rechazadas_total'))undatedRejections++;
+    }
     const seen={A:new Set(),B:new Set()};
-    for(const {metric,at} of events){
+    for(const {metric,at,estimated} of events){
       if(!ids.includes(metric))continue;
       for(const [name,rng] of [['A',A],['B',B]]){
         if(!groupInRange(at,t,rng)||seen[name].has(metric))continue;
         seen[name].add(metric);counts[name][metric]++;
+        if(metric==='rechazadas_total'&&estimated){if(name==='A')estimatedRejectionsA++;else estimatedRejectionsB++;}
       }
     }
     if(rec?.stage1&&!submission.date)undatedSubmissions++;
@@ -284,6 +325,8 @@ export function buildCreditDashboardComparison(records,{type='month',period='',s
     departments:rows,totals,total_a:counts.A.finalizados,total_b:counts.B.finalizados,
     active_no_answer:activeNoAnswer,records_scanned:recordsScanned,
     undated_finalized:undatedFinalized,undated_submissions:undatedSubmissions,
-    legacy_submissions_current:legacyA,legacy_submissions_previous:legacyB,unknown_amount:unknownAmount
+    legacy_submissions_current:legacyA,legacy_submissions_previous:legacyB,unknown_amount:unknownAmount,
+    currently_rejected:currentlyRejected,undated_rejections:undatedRejections,
+    estimated_rejections_current:estimatedRejectionsA,estimated_rejections_previous:estimatedRejectionsB
   };
 }

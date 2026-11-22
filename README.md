@@ -1,3 +1,9 @@
+# CrediZas V23.10 — Rechazos en Análisis
+
+Continuidad acumulativa sobre V23.9. La pestaña Análisis ahora registra rechazos administrativos en Precalificación y Formalización, además de rechazos del cliente. Añade tarjetas y totales sin duplicados, conserva comparación por día/mes/año A/B y advierte cuando una fecha histórica es aproximada. Ver `README_V23.10_RECHAZOS_EN_ANALISIS.md`.
+
+---
+
 > **V23.9:** corrige el conteo de envíos Paso 1, separa expedientes con actividad, permite comparar dos rangos de fechas y alinea columnas y totales del análisis. Ver `README_V23.9_ANALISIS_RANGOS_Y_RECONCILIACION.md`.
 
 > **V23.8:** separa Casos y Análisis en pestañas de Administración. El embudo y los resultados por departamento están únicamente en Análisis. Véase `README_V23.8_PESTANA_ANALISIS.md`.

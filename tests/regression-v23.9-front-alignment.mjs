@@ -24,9 +24,9 @@ for(const [type,a,b,c,d] of [
  assert.equal(footerCount,thCount,`${type} footer`);
  const bodyFirst=body.split('</tr>')[0];
  assert.equal((bodyFirst.match(/<(?:td|th)\b/g)||[]).length,thCount,`${type} body`);
- assert.equal((q('#creditFunnelRows').innerHTML.match(/<tr\b/g)||[]).length,18); // 13 indicadores + 1 sección + 4 tasas
+ assert.equal((q('#creditFunnelRows').innerHTML.match(/<tr\b/g)||[]).length,22); // 17 indicadores + 1 sección + 4 tasas (V23.10)
  assert(q('#creditCompareCurrent').textContent.includes('A ·'));
  assert(q('#creditComparePrevious').textContent.includes('B ·'));
  assert(q('#creditReportStatus').textContent.includes('expedientes en base analizados'));
 }
-console.log('OK V23.9 frontend: alineación exacta de cabecera, filas y totales en días, meses y años; cinco KPI y dos rangos.');
+console.log('OK V23.9 frontend: alineación exacta de cabecera, filas y totales en días, meses y años; siete KPI y dos rangos.');
