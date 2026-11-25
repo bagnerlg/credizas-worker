@@ -3,7 +3,7 @@ const GT_TIMEZONE = 'America/Guatemala';
 const dtf = new Intl.DateTimeFormat('en-US', {timeZone:GT_TIMEZONE,year:'numeric',month:'2-digit',day:'2-digit'});
 const METRIC_IDS = [
   'ingresadas','precalificacion_aprobada','cuotas_enviadas','cliente_acepta',
-  'cliente_no_responde','contacto_retomado','cliente_rechaza',
+  'cliente_no_responde','cliente_no_envia_datos','documentos_retomados','contacto_retomado','cliente_rechaza',
   'precalificacion_rechazada','formalizacion_rechazada','rechazo_administrativo','rechazadas_total','formalizacion_enviada',
   'formalizacion_aprobada','banco_registrado','finalizados','monto_finalizado'
 ];
@@ -13,6 +13,8 @@ export const ANALYTICS_METRIC_LABELS = {
   cuotas_enviadas:'Ofertas de cuotas enviadas',
   cliente_acepta:'Cliente acepta las condiciones',
   cliente_no_responde:'Cliente no responde',
+  cliente_no_envia_datos:'Cliente no envía datos',
+  documentos_retomados:'Documentos retomados',
   contacto_retomado:'Contacto retomado',
   cliente_rechaza:'Cliente rechaza las condiciones',
   precalificacion_rechazada:'Precalificaciones rechazadas (administrador)',
@@ -76,6 +78,9 @@ function metricEvents(rec){
   add('cuotas_enviadas',rec?.stage3?.quotes?.sent_at);
   add('cliente_acepta',rec?.stage3?.seller_ratification?.confirmed_at);
   add('cliente_no_responde',rec?.stage3?.client_followup?.started_at);
+  add('cliente_no_envia_datos',rec?.stage3?.documents_followup?.first_at);
+  add('cliente_no_envia_datos',rec?.stage3?.documents_followup?.started_at);
+  add('documentos_retomados',rec?.stage3?.documents_followup?.resumed_at);
   rejection('cliente_rechaza',rec?.stage3?.client_rejection?.rejected_at);
   add('contacto_retomado',rec?.stage3?.client_followup?.resumed_at);
   add('formalizacion_enviada',rec?.stage2?.submitted_at);
@@ -85,6 +90,8 @@ function metricEvents(rec){
     if(e==='ADMIN_CONTROL_PRECALIFICACION'&&h.to_state==='APROBADA')add('precalificacion_aprobada',h.at);
     if(e==='ADMIN_CONTROL_FORMALIZACION'&&h.to_state==='APROBADA')add('formalizacion_aprobada',h.at);
     if(e==='STAGE3_CLIENTE_NO_CONTESTA')add('cliente_no_responde',h.at);
+    if(e==='STAGE2_CLIENTE_NO_ENVIA_DATOS')add('cliente_no_envia_datos',h.at);
+    if(e==='STAGE2_DOCUMENTOS_RETOMADOS')add('documentos_retomados',h.at);
     if(e==='STAGE3_CONTACTO_RETOMADO')add('contacto_retomado',h.at);
     if(e==='STAGE3_RECHAZADO_CLIENTE')rejection('cliente_rechaza',h.at);
     if(e==='ADMIN_CONTROL_PRECALIFICACION'&&String(h.to_state||'').toUpperCase()==='RECHAZADA')rejection('precalificacion_rechazada',h.at);
@@ -249,6 +256,25 @@ function computedCohort(rec){
     finalizadas:String(rec?.stage3?.status||'')==='CREDITO FINALIZADO CON EXITO'
   };
 }
+// V23.11 — Cohortes de ingreso por departamento. Las rechazadas son un subconjunto
+// de las ingresadas en el mismo intervalo, según su estado actual. No son eventos
+// de rechazo del intervalo (ese indicador permanece independiente en el embudo).
+function requestedCents(rec){
+  const raw=rec?.stage1?.data?.solicitud?.monto_total_solicitado;
+  if(raw===null||raw===undefined||String(raw).trim()==='')return null;
+  const n=Number(raw);return Number.isFinite(n)&&n>0&&Number.isSafeInteger(Math.round(n*100))?Math.round(n*100):null;
+}
+function freshGeoBucket(){return {count:{},cents:{},count_b:0,cents_b:0,unknown_a:0,unknown_b:0}}
+function addGeoBucket(bucket,name,key,cents){
+  if(name==='A'){bucket.count[key]=(bucket.count[key]||0)+1; if(cents!==null)bucket.cents[key]=(bucket.cents[key]||0)+cents;else bucket.unknown_a++;}
+  else{bucket.count_b++;if(cents!==null)bucket.cents_b+=cents;else bucket.unknown_b++;}
+}
+function geoCohortReport(groups,kind,keys){
+  const rows=[...groups.values()].map(g=>{const d=g[kind],counts=keys.map(k=>d.count[k]||0),amounts=keys.map(k=>(d.cents[k]||0)/100);return {department:g.department,counts,amounts,current:counts.reduce((a,b)=>a+b,0),previous:d.count_b,current_amount:keys.reduce((a,k)=>a+(d.cents[k]||0),0)/100,previous_amount:d.cents_b/100,unknown_a:d.unknown_a,unknown_b:d.unknown_b}}).sort((a,b)=>b.current-a.current||b.previous-a.previous||a.department.localeCompare(b.department,'es'));
+  const totals=keys.map((_,i)=>rows.reduce((n,r)=>n+r.counts[i],0));
+  const sum=k=>rows.reduce((n,r)=>n+r[k],0);
+  return {rows,totals,total_a:sum('current'),total_b:sum('previous'),amount_a:Math.round(sum('current_amount')*100)/100,amount_b:Math.round(sum('previous_amount')*100)/100,unknown_a:sum('unknown_a'),unknown_b:sum('unknown_b')};
+}
 export function buildCreditDashboardComparison(records,{type='month',period='',seller_id='',start_a,end_a,start_b,end_b}={},now=new Date()){
   const sel=resolvePeriod(type,period,now),t=sel.type;
   const A=comparisonRange(t,start_a,end_a,sel.period);
@@ -260,7 +286,7 @@ export function buildCreditDashboardComparison(records,{type='month',period='',s
   const counts={A:fresh(),B:fresh()};
   const freshCohort=()=>({ingresadas:0,aprobadas:0,con_oferta:0,aceptadas:0,formalizadas:0,finalizadas:0});
   const cohorts={A:freshCohort(),B:freshCohort()};
-  const groups=new Map();let recordsScanned=0,undatedFinalized=0,unknownAmount=0,activeNoAnswer=0,legacyA=0,legacyB=0,undatedSubmissions=0,estimatedRejectionsA=0,estimatedRejectionsB=0,undatedRejections=0,currentlyRejected=0;
+  const groups=new Map(),cohortGeo=new Map();let activeNoDocuments=0;let recordsScanned=0,undatedFinalized=0,unknownAmount=0,activeNoAnswer=0,legacyA=0,legacyB=0,undatedSubmissions=0,estimatedRejectionsA=0,estimatedRejectionsB=0,undatedRejections=0,currentlyRejected=0;
   for(const rec of records||[]){
     if(seller_id&&String(rec?.vendedor_id||'')!==String(seller_id))continue;
     recordsScanned++;
@@ -281,14 +307,18 @@ export function buildCreditDashboardComparison(records,{type='month',period='',s
     }
     if(rec?.stage1&&!submission.date)undatedSubmissions++;
     const cohort=computedCohort(rec);
+    const dep=normalizedDepartment(rec),isRejected=!cohort.finalizadas&&(rejected.p1||rejected.p2||rejected.client),cents=requestedCents(rec);
+    if(!cohortGeo.has(dep))cohortGeo.set(dep,{department:dep,ingresadas:freshGeoBucket(),rechazadas:freshGeoBucket()});
+    const geo=cohortGeo.get(dep);
+    if(rec?.stage3?.status==='CLIENTE NO ENVIA DATOS'&&!isRejected&&!cohort.finalizadas)activeNoDocuments++;
     for(const [name,rng] of [['A',A],['B',B]]){
-      if(!groupInRange(submission.date,t,rng))continue;
+      const key=groupInRange(submission.date,t,rng);if(!key)continue;
+      addGeoBucket(geo.ingresadas,name,key,cents);if(isRejected)addGeoBucket(geo.rechazadas,name,key,cents);
       const c=cohorts[name];c.ingresadas++;
       for(const field of ['aprobadas','con_oferta','aceptadas','formalizadas','finalizadas'])if(cohort[field])c[field]++;
       if(submission.source==='legacy_created_at')name==='A'?legacyA++:legacyB++;
     }
     if(rec?.stage3?.status==='CLIENTE NO CONTESTA')activeNoAnswer++;
-    const dep=normalizedDepartment(rec);
     if(!groups.has(dep))groups.set(dep,{department:dep,count:{},amount:{},total_b:0,amount_b:0});
     const last=finalizationTime(rec);
     if(rec?.stage3?.status==='CREDITO FINALIZADO CON EXITO'&&!last)undatedFinalized++;
@@ -323,6 +353,8 @@ export function buildCreditDashboardComparison(records,{type='month',period='',s
     metrics:Object.fromEntries(ids.map(id=>[id,{current:counts.A[id],previous:counts.B[id]}])),
     cohorts:{current:cohorts.A,previous:cohorts.B},
     departments:rows,totals,total_a:counts.A.finalizados,total_b:counts.B.finalizados,
+    department_submissions:geoCohortReport(cohortGeo,"ingresadas",A.keys),
+    department_rejections:geoCohortReport(cohortGeo,"rechazadas",A.keys),active_no_documents:activeNoDocuments,
     active_no_answer:activeNoAnswer,records_scanned:recordsScanned,
     undated_finalized:undatedFinalized,undated_submissions:undatedSubmissions,
     legacy_submissions_current:legacyA,legacy_submissions_previous:legacyB,unknown_amount:unknownAmount,

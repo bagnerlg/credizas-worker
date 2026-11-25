@@ -1,3 +1,9 @@
+# CrediZas V23.11 — No envía datos y solicitudes por departamento
+
+Continuidad acumulativa sobre V23.10. Agrega seguimiento recuperable por falta de selfie/documento de domicilio y reportes de solicitudes ingresadas y rechazadas por departamento (cantidad, monto solicitado y tasa de rechazo, rangos A/B). Conserva el reporte de finalizados. Ver `README_V23.11_DOCUMENTOS_Y_DEPARTAMENTOS.md`.
+
+---
+
 # CrediZas V23.10 — Rechazos en Análisis
 
 Continuidad acumulativa sobre V23.9. La pestaña Análisis ahora registra rechazos administrativos en Precalificación y Formalización, además de rechazos del cliente. Añade tarjetas y totales sin duplicados, conserva comparación por día/mes/año A/B y advierte cuando una fecha histórica es aproximada. Ver `README_V23.10_RECHAZOS_EN_ANALISIS.md`.
